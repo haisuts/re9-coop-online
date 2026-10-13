@@ -1,0 +1,504 @@
+#include "net.hpp"
+#include "steam_flat.hpp"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace steam {
+
+template <typename T>
+static bool get_proc(HMODULE mod, const char* name, T& out, const char** missing) {
+    out = reinterpret_cast<T>(GetProcAddress(mod, name));
+    if (out == nullptr && missing != nullptr && *missing == nullptr) {
+        *missing = name;
+    }
+    return out != nullptr;
+}
+
+bool load_api(Api& a, const char** missing) {
+    HMODULE m = GetModuleHandleA("steam_api64.dll");
+    if (m == nullptr) {
+        if (missing) *missing = "steam_api64.dll";
+        return false;
+    }
+    bool ok = true;
+    ok &= get_proc(m, "SteamAPI_SteamMatchmaking_v009", a.SteamMatchmaking, missing);
+    ok &= get_proc(m, "SteamAPI_SteamFriends_v017", a.SteamFriends, missing);
+    ok &= get_proc(m, "SteamAPI_SteamUser_v021", a.SteamUser, missing);
+    ok &= get_proc(m, "SteamAPI_SteamUtils_v010", a.SteamUtils, missing);
+    ok &= get_proc(m, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002", a.SteamNetworkingMessages, missing);
+    ok &= get_proc(m, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", a.SteamNetworkingUtils, missing);
+    ok &= get_proc(m, "SteamAPI_RegisterCallback", a.RegisterCallback, missing);
+    ok &= get_proc(m, "SteamAPI_UnregisterCallback", a.UnregisterCallback, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_CreateLobby", a.CreateLobby, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_JoinLobby", a.JoinLobby, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_LeaveLobby", a.LeaveLobby, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers", a.GetNumLobbyMembers, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex", a.GetLobbyMemberByIndex, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_GetLobbyOwner", a.GetLobbyOwner, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_SetLobbyData", a.SetLobbyData, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_GetLobbyData", a.GetLobbyData, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable", a.SetLobbyJoinable, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamMatchmaking_InviteUserToLobby", a.InviteUserToLobby, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_GetPersonaName", a.GetPersonaName, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_GetFriendCount", a.GetFriendCount, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_GetFriendByIndex", a.GetFriendByIndex, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_GetFriendPersonaName", a.GetFriendPersonaName, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_GetFriendGamePlayed", a.GetFriendGamePlayed, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog", a.ActivateGameOverlayInviteDialog, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamFriends_SetRichPresence", a.SetRichPresence, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamUser_GetSteamID", a.GetSteamID, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamUtils_IsAPICallCompleted", a.IsAPICallCompleted, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamUtils_GetAPICallResult", a.GetAPICallResult, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamUtils_GetAppID", a.GetAppID, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_SendMessageToUser", a.SendMessageToUser, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel", a.ReceiveMessagesOnChannel, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser", a.AcceptSessionWithUser, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser", a.CloseSessionWithUser, missing);
+    ok &= get_proc(m, "SteamAPI_SteamNetworkingMessage_t_Release", a.MessageRelease, missing);
+    ok &= get_proc(m, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", a.InitRelayNetworkAccess, missing);
+    a.loaded = ok;
+    return ok;
+}
+
+} // namespace steam
+
+namespace net {
+namespace {
+
+constexpr int kInternalChannel = 7;      // hellos / keepalives, never shown to Lua
+constexpr const char* kLobbyTag = "re9coop";
+constexpr const char* kProtocol = "1";   // bumped when the Lua wire format changes
+
+enum class Pending { None, Create, Join };
+
+struct LoopPacket {
+    ULONGLONG due;
+    int channel;
+    std::string data;
+};
+
+std::recursive_mutex g_mx;
+steam::Api g_api{};
+bool g_inited{false};
+Status g_st{};
+Pending g_pending{Pending::None};
+steam::SteamAPICall_t g_call{steam::k_uAPICallInvalid};
+ULONGLONG g_next_refresh{0};
+std::unordered_map<std::uint64_t, ULONGLONG> g_next_hello; // member -> next hello time
+std::unordered_set<std::uint64_t> g_heard;                 // members we've received from
+std::uint64_t g_pending_join{0};
+int g_loop_delay{0};
+std::deque<LoopPacket> g_loop;
+
+void* mm() { return g_api.SteamMatchmaking(); }
+void* fr() { return g_api.SteamFriends(); }
+void* ut() { return g_api.SteamUtils(); }
+void* nm() { return g_api.SteamNetworkingMessages(); }
+
+steam::SteamNetworkingIdentity ident(std::uint64_t id) {
+    steam::SteamNetworkingIdentity i{};
+    i.set_steam_id(id);
+    return i;
+}
+
+bool is_member(std::uint64_t id) {
+    for (auto& m : g_st.members) {
+        if (m.id == id) return true;
+    }
+    return false;
+}
+
+void set_error(const std::string& e) {
+    g_st.state = State::Error;
+    g_st.error = e;
+}
+
+void clear_lobby() {
+    if (g_api.loaded) {
+        for (auto& m : g_st.members) {
+            if (m.id != g_st.me) {
+                auto i = ident(m.id);
+                g_api.CloseSessionWithUser(nm(), &i);
+            }
+        }
+        g_api.SetRichPresence(fr(), "connect", "");
+    }
+    g_st.lobby = 0;
+    g_st.owner = 0;
+    g_st.is_host = false;
+    g_st.members.clear();
+    g_next_hello.clear();
+    g_heard.clear();
+}
+
+void refresh_members() {
+    std::vector<Member> list;
+    const int n = g_api.GetNumLobbyMembers(mm(), g_st.lobby);
+    for (int i = 0; i < n; ++i) {
+        const auto id = g_api.GetLobbyMemberByIndex(mm(), g_st.lobby, i);
+        const char* name = g_api.GetFriendPersonaName(fr(), id);
+        list.push_back({id, name ? name : ""});
+    }
+    g_st.owner = g_api.GetLobbyOwner(mm(), g_st.lobby);
+    g_st.is_host = g_st.owner == g_st.me;
+    // new members: open the session from our side (sending implicitly accepts theirs)
+    for (auto& m : list) {
+        if (m.id != g_st.me && g_next_hello.find(m.id) == g_next_hello.end()) {
+            auto i = ident(m.id);
+            g_api.AcceptSessionWithUser(nm(), &i);
+            g_next_hello[m.id] = 0;
+        }
+    }
+    for (auto it = g_next_hello.begin(); it != g_next_hello.end();) {
+        const auto id = it->first;
+        const bool still = std::any_of(list.begin(), list.end(), [id](const Member& m) { return m.id == id; });
+        if (!still) {
+            auto i = ident(id);
+            g_api.CloseSessionWithUser(nm(), &i);
+            g_heard.erase(id);
+            it = g_next_hello.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    g_st.members = std::move(list);
+}
+
+void send_hellos(ULONGLONG now) {
+    for (auto& [id, next] : g_next_hello) {
+        if (now < next) continue;
+        // keep saying hello until we've heard back, then every 5 s as a keepalive
+        next = now + (g_heard.count(id) ? 5000 : 1000);
+        auto i = ident(id);
+        static const char hello[] = "re9coop-hello";
+        g_api.SendMessageToUser(nm(), &i, hello, sizeof(hello) - 1,
+            steam::k_nSteamNetworkingSend_Unreliable | steam::k_nSteamNetworkingSend_AutoRestartBrokenSession,
+            kInternalChannel);
+    }
+}
+
+void drain_internal() {
+    steam::SteamNetworkingMessage_t* msgs[32];
+    int n;
+    while ((n = g_api.ReceiveMessagesOnChannel(nm(), kInternalChannel, msgs, 32)) > 0) {
+        for (int i = 0; i < n; ++i) {
+            g_heard.insert(msgs[i]->m_identityPeer.steam_id());
+            g_api.MessageRelease(msgs[i]);
+        }
+    }
+}
+
+void poll_call() {
+    if (g_call == steam::k_uAPICallInvalid) return;
+    bool failed = false;
+    if (!g_api.IsAPICallCompleted(ut(), g_call, &failed)) return;
+    const auto call = g_call;
+    const auto kind = g_pending;
+    g_call = steam::k_uAPICallInvalid;
+    g_pending = Pending::None;
+
+    if (kind == Pending::Create) {
+        steam::LobbyCreated_t r{};
+        if (!g_api.GetAPICallResult(ut(), call, &r, sizeof(r), r.k_iCallback, &failed) || failed) {
+            return set_error("lobby create: call failed");
+        }
+        if (r.m_eResult != steam::k_EResultOK) {
+            return set_error("lobby create: EResult " + std::to_string(r.m_eResult));
+        }
+        g_st.lobby = r.m_ulSteamIDLobby;
+        g_st.state = State::InLobby;
+        g_api.SetLobbyData(mm(), g_st.lobby, kLobbyTag, kProtocol);
+        char connect[64];
+        std::snprintf(connect, sizeof(connect), "+connect_lobby %llu", (unsigned long long)g_st.lobby);
+        g_api.SetRichPresence(fr(), "connect", connect);
+        refresh_members();
+    } else if (kind == Pending::Join) {
+        steam::LobbyEnter_t r{};
+        if (!g_api.GetAPICallResult(ut(), call, &r, sizeof(r), r.k_iCallback, &failed) || failed) {
+            return set_error("lobby join: call failed");
+        }
+        if (r.m_EChatRoomEnterResponse != steam::k_EChatRoomEnterResponseSuccess) {
+            return set_error("lobby join: response " + std::to_string(r.m_EChatRoomEnterResponse));
+        }
+        g_st.lobby = r.m_ulSteamIDLobby;
+        const char* tag = g_api.GetLobbyData(mm(), g_st.lobby, kLobbyTag);
+        if (tag == nullptr || std::strcmp(tag, kProtocol) != 0) {
+            g_api.LeaveLobby(mm(), g_st.lobby);
+            g_st.lobby = 0;
+            return set_error(tag && *tag ? "host runs another mod version" : "not a RE9 co-op lobby");
+        }
+        g_st.state = State::InLobby;
+        refresh_members();
+    }
+}
+
+// --- Steam callbacks (only fire if the game dispatches callbacks the usual way) ---
+
+template <typename T, void (*Fn)(T*)>
+class Callback : public steam::CCallbackBase {
+public:
+    Callback() { m_iCallback = T::k_iCallback; }
+    void Run(void* p) override { Fn(static_cast<T*>(p)); }
+    void Run(void* p, bool, steam::SteamAPICall_t) override { Fn(static_cast<T*>(p)); }
+    int GetCallbackSizeBytes() override { return sizeof(T); }
+};
+
+std::uint64_t parse_connect(const char* s) {
+    const char* p = std::strstr(s, "+connect_lobby");
+    if (p == nullptr) return 0;
+    p += std::strlen("+connect_lobby");
+    while (*p == ' ' || *p == '"') ++p;
+    return std::strtoull(p, nullptr, 10);
+}
+
+void on_lobby_join_requested(steam::GameLobbyJoinRequested_t* p) {
+    std::lock_guard _{g_mx};
+    g_pending_join = p->m_steamIDLobby;
+}
+
+void on_rich_presence_join(steam::GameRichPresenceJoinRequested_t* p) {
+    std::lock_guard _{g_mx};
+    char buf[257]{};
+    std::memcpy(buf, p->m_rgchConnect, 256);
+    if (auto id = parse_connect(buf)) g_pending_join = id;
+}
+
+void on_session_request(steam::SteamNetworkingMessagesSessionRequest_t* p) {
+    std::lock_guard _{g_mx};
+    const auto id = p->m_identityRemote.steam_id();
+    if (g_st.state == State::InLobby && is_member(id)) {
+        g_api.AcceptSessionWithUser(nm(), &p->m_identityRemote);
+    }
+}
+
+Callback<steam::GameLobbyJoinRequested_t, on_lobby_join_requested> g_cb_join;
+Callback<steam::GameRichPresenceJoinRequested_t, on_rich_presence_join> g_cb_rp;
+Callback<steam::SteamNetworkingMessagesSessionRequest_t, on_session_request> g_cb_session;
+
+} // namespace
+
+const char* state_name(State s) {
+    switch (s) {
+    case State::Idle: return "idle";
+    case State::Creating: return "creating";
+    case State::Joining: return "joining";
+    case State::InLobby: return "in_lobby";
+    case State::Error: return "error";
+    }
+    return "?";
+}
+
+bool init() {
+    std::lock_guard _{g_mx};
+    if (g_inited) return g_api.loaded;
+    const char* missing = nullptr;
+    if (!steam::load_api(g_api, &missing)) {
+        // steam_api64.dll may not be initialised yet; try again on the next call
+        g_st.error = std::string("steam api missing: ") + (missing ? missing : "?");
+        return false;
+    }
+    if (g_api.SteamUser() == nullptr || nm() == nullptr) {
+        g_api.loaded = false;
+        g_st.error = "steam not initialised yet";
+        return false;
+    }
+    g_inited = true;
+    g_st.steam = true;
+    g_st.me = g_api.GetSteamID(g_api.SteamUser());
+    g_api.InitRelayNetworkAccess(g_api.SteamNetworkingUtils());
+    g_api.RegisterCallback(&g_cb_join, g_cb_join.GetICallback());
+    g_api.RegisterCallback(&g_cb_rp, g_cb_rp.GetICallback());
+    g_api.RegisterCallback(&g_cb_session, g_cb_session.GetICallback());
+    // launched by Steam from an invite while the game wasn't running
+    g_pending_join = parse_connect(GetCommandLineA());
+    g_st.error.clear();
+    return true;
+}
+
+void shutdown() {
+    std::lock_guard _{g_mx};
+    if (!g_inited) return;
+    leave();
+    g_api.UnregisterCallback(&g_cb_join);
+    g_api.UnregisterCallback(&g_cb_rp);
+    g_api.UnregisterCallback(&g_cb_session);
+    g_inited = false;
+}
+
+void tick() {
+    std::lock_guard _{g_mx};
+    if (!g_inited && !init()) return;
+    poll_call();
+    if (g_st.state != State::InLobby) return;
+    const auto now = GetTickCount64();
+    if (now >= g_next_refresh) {
+        g_next_refresh = now + 500;
+        refresh_members();
+        if (!is_member(g_st.me)) { // kicked, or the lobby is gone
+            clear_lobby();
+            set_error("lost the lobby");
+            return;
+        }
+    }
+    drain_internal();
+    send_hellos(now);
+}
+
+bool host(int max_members) {
+    std::lock_guard _{g_mx};
+    if (!g_inited && !init()) return false;
+    if (g_st.state == State::InLobby) leave();
+    if (g_pending != Pending::None) return false;
+    g_st.error.clear();
+    g_call = g_api.CreateLobby(mm(), steam::k_ELobbyTypeFriendsOnly, std::clamp(max_members, 2, 4));
+    if (g_call == steam::k_uAPICallInvalid) {
+        set_error("CreateLobby refused");
+        return false;
+    }
+    g_pending = Pending::Create;
+    g_st.state = State::Creating;
+    return true;
+}
+
+bool join(std::uint64_t lobby) {
+    std::lock_guard _{g_mx};
+    if (!g_inited && !init()) return false;
+    if (lobby == 0) return false;
+    if (g_st.state == State::InLobby) leave();
+    if (g_pending != Pending::None) return false;
+    g_st.error.clear();
+    g_call = g_api.JoinLobby(mm(), lobby);
+    if (g_call == steam::k_uAPICallInvalid) {
+        set_error("JoinLobby refused");
+        return false;
+    }
+    g_pending = Pending::Join;
+    g_st.state = State::Joining;
+    return true;
+}
+
+void leave() {
+    std::lock_guard _{g_mx};
+    if (!g_inited) return;
+    if (g_st.lobby != 0) g_api.LeaveLobby(mm(), g_st.lobby);
+    clear_lobby();
+    g_call = steam::k_uAPICallInvalid;
+    g_pending = Pending::None;
+    g_st.state = State::Idle;
+    g_st.error.clear();
+}
+
+bool invite_overlay() {
+    std::lock_guard _{g_mx};
+    if (!g_inited || g_st.state != State::InLobby) return false;
+    g_api.ActivateGameOverlayInviteDialog(fr(), g_st.lobby);
+    return true;
+}
+
+std::vector<FriendLobby> friends_in_game() {
+    std::lock_guard _{g_mx};
+    std::vector<FriendLobby> out;
+    if (!g_inited && !init()) return out;
+    const auto app = g_api.GetAppID(ut());
+    const int n = g_api.GetFriendCount(fr(), steam::k_EFriendFlagImmediate);
+    for (int i = 0; i < n; ++i) {
+        const auto id = g_api.GetFriendByIndex(fr(), i, steam::k_EFriendFlagImmediate);
+        steam::FriendGameInfo_t gi{};
+        if (!g_api.GetFriendGamePlayed(fr(), id, &gi)) continue;
+        if ((gi.m_gameID & 0xFFFFFF) != app) continue;
+        const char* name = g_api.GetFriendPersonaName(fr(), id);
+        out.push_back({id, name ? name : "", gi.m_steamIDLobby});
+    }
+    return out;
+}
+
+Status status() {
+    std::lock_guard _{g_mx};
+    if (!g_inited) init();
+    return g_st;
+}
+
+std::string my_name() {
+    std::lock_guard _{g_mx};
+    if (!g_inited && !init()) return "";
+    const char* n = g_api.GetPersonaName(fr());
+    return n ? n : "";
+}
+
+std::uint64_t take_pending_join() {
+    std::lock_guard _{g_mx};
+    const auto id = g_pending_join;
+    g_pending_join = 0;
+    return id;
+}
+
+int send(const std::string& data, bool reliable, int channel, std::uint64_t to) {
+    std::lock_guard _{g_mx};
+    if (channel < 0 || channel >= kMaxChannels) return 0;
+    int count = 0;
+    if (g_st.loopback && (to == 0 || to == kLoopbackPeer)) {
+        g_loop.push_back({GetTickCount64() + (ULONGLONG)g_loop_delay, channel, data});
+        ++count;
+    }
+    if (!g_inited || g_st.state != State::InLobby) return count;
+    const int flags = (reliable ? steam::k_nSteamNetworkingSend_Reliable
+                                : steam::k_nSteamNetworkingSend_Unreliable | steam::k_nSteamNetworkingSend_NoNagle)
+        | steam::k_nSteamNetworkingSend_AutoRestartBrokenSession;
+    for (auto& m : g_st.members) {
+        if (m.id == g_st.me || (to != 0 && to != m.id)) continue;
+        auto i = ident(m.id);
+        if (g_api.SendMessageToUser(nm(), &i, data.data(), (std::uint32_t)data.size(), flags, channel) == steam::k_EResultOK) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::vector<Packet> recv(int channel, int max) {
+    std::lock_guard _{g_mx};
+    std::vector<Packet> out;
+    if (channel < 0 || channel >= kMaxChannels) return out;
+    const auto now = GetTickCount64();
+    for (auto it = g_loop.begin(); it != g_loop.end() && (int)out.size() < max;) {
+        if (it->channel == channel && it->due <= now) {
+            out.push_back({kLoopbackPeer, std::move(it->data)});
+            it = g_loop.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (!g_inited || g_st.state != State::InLobby) return out;
+    steam::SteamNetworkingMessage_t* msgs[64];
+    while ((int)out.size() < max) {
+        const int want = std::min(64, max - (int)out.size());
+        const int n = g_api.ReceiveMessagesOnChannel(nm(), channel, msgs, want);
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i) {
+            const auto from = msgs[i]->m_identityPeer.steam_id();
+            if (is_member(from)) { // never accept data from anyone outside our lobby
+                g_heard.insert(from);
+                out.push_back({from, std::string(static_cast<const char*>(msgs[i]->m_pData), msgs[i]->m_cbSize)});
+            }
+            g_api.MessageRelease(msgs[i]);
+        }
+    }
+    return out;
+}
+
+void set_loopback(bool enabled, int delay_ms) {
+    std::lock_guard _{g_mx};
+    g_st.loopback = enabled;
+    g_loop_delay = std::max(0, delay_ms);
+    if (!enabled) g_loop.clear();
+}
+
+} // namespace net

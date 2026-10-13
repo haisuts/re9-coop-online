@@ -1,0 +1,159 @@
+-- RE9 co-op dev bridge (development only, never shipped).
+-- Polls reframework/data/re9coop_bridge/cmd.lua; when its first line "--id:<id>" changes, runs the
+-- chunk on the game thread (UpdateBehavior) and writes the result to out.txt with the same id.
+-- Globals in _G.dev persist between commands.
+
+local CMD = "re9coop_bridge/cmd.lua"
+local OUT = "re9coop_bridge/out.txt"
+local last_id = nil
+local tick = 0
+
+_G.dev = _G.dev or {}
+local dev = _G.dev
+
+local function is_managed(v)
+    return type(v) == "userdata" and pcall(function() return v.get_type_definition end)
+end
+
+local function ser(v, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+    local t = type(v)
+    if t == "string" then return string.format("%q", v) end
+    if t ~= "table" and t ~= "userdata" then return tostring(v) end
+    if t == "userdata" then
+        local ok, td = pcall(function() return v:get_type_definition() end)
+        if ok and td then
+            local ok2, name = pcall(function() return td:get_full_name() end)
+            return string.format("<%s @%s>", ok2 and name or "?", tostring(v))
+        end
+        local ok3, x = pcall(function() return v.x end)
+        if ok3 and x ~= nil then
+            local ok4, w = pcall(function() return v.w end)
+            if ok4 and w ~= nil then
+                return string.format("(%.4f, %.4f, %.4f, %.4f)", v.x, v.y, v.z, w)
+            end
+            local ok5, z = pcall(function() return v.z end)
+            if ok5 and z ~= nil then return string.format("(%.4f, %.4f, %.4f)", v.x, v.y, z) end
+            return string.format("(%.4f, %.4f)", v.x, v.y)
+        end
+        return tostring(v)
+    end
+    if seen[v] then return "<cycle>" end
+    if depth > 6 then return "<deep>" end
+    seen[v] = true
+    local parts = {}
+    local n = #v
+    for i = 1, n do parts[#parts + 1] = ser(v[i], depth + 1, seen) end
+    local keys = {}
+    for k in pairs(v) do
+        if not (type(k) == "number" and k >= 1 and k <= n and math.type(k) == "integer") then
+            keys[#keys + 1] = k
+        end
+    end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, k in ipairs(keys) do
+        parts[#parts + 1] = tostring(k) .. "=" .. ser(v[k], depth + 1, seen)
+    end
+    local ind = string.rep("  ", depth + 1)
+    if #parts > 6 then
+        return "{\n" .. ind .. table.concat(parts, ",\n" .. ind) .. "\n" .. string.rep("  ", depth) .. "}"
+    end
+    return "{" .. table.concat(parts, ", ") .. "}"
+end
+dev.ser = ser
+
+-- Fields and methods of a type definition (by name or object).
+function dev.typeinfo(x, filter)
+    local td = type(x) == "string" and sdk.find_type_definition(x) or x:get_type_definition()
+    if not td then return "no type " .. tostring(x) end
+    local out = { name = td:get_full_name() }
+    local parent = td:get_parent_type()
+    out.parent = parent and parent:get_full_name() or nil
+    out.fields, out.methods = {}, {}
+    for _, f in ipairs(td:get_fields()) do
+        local s = (f:is_static() and "static " or "") .. f:get_name() .. ": " .. f:get_type():get_full_name()
+        if not filter or s:lower():find(filter:lower(), 1, true) then out.fields[#out.fields + 1] = s end
+    end
+    for _, m in ipairs(td:get_methods()) do
+        local params = {}
+        local ok, ptypes = pcall(function() return m:get_param_types() end)
+        local ok2, pnames = pcall(function() return m:get_param_names() end)
+        if ok and ptypes then
+            for i, p in ipairs(ptypes) do
+                params[#params + 1] = ((ok2 and pnames and pnames[i]) or "") .. ":" .. p:get_full_name()
+            end
+        end
+        local rt = m:get_return_type()
+        local s = (m:is_static() and "static " or "") .. m:get_name() .. "(" .. table.concat(params, ", ") .. ")"
+            .. (rt and (" -> " .. rt:get_full_name()) or "")
+        if not filter or s:lower():find(filter:lower(), 1, true) then out.methods[#out.methods + 1] = s end
+    end
+    return out
+end
+
+-- Find type names in the TDB containing a substring (case-insensitive). Results also written to a file.
+function dev.find_types(pat, limit)
+    local tdb = sdk.get_tdb()
+    local res = {}
+    pat = pat:lower()
+    local n = tdb:get_num_types()
+    for i = 0, n - 1 do
+        local ok, td = pcall(function() return tdb:get_type(i) end)
+        if ok and td then
+            local name = td:get_full_name()
+            if name and name:lower():find(pat, 1, true) then
+                res[#res + 1] = name
+                if limit and #res >= limit then break end
+            end
+        end
+    end
+    table.sort(res)
+    return res
+end
+
+function dev.all_types_to_file(path)
+    local tdb = sdk.get_tdb()
+    local lines = {}
+    for i = 0, tdb:get_num_types() - 1 do
+        local ok, td = pcall(function() return tdb:get_type(i) end)
+        if ok and td then lines[#lines + 1] = td:get_full_name() end
+    end
+    fs.write(path, table.concat(lines, "\n"))
+    return #lines
+end
+
+function dev.singletons(pat)
+    local res = {}
+    for _, s in ipairs(sdk.get_managed_singletons()) do
+        local ok, name = pcall(function() return s.instance:get_type_definition():get_full_name() end)
+        if ok and (not pat or name:lower():find(pat:lower(), 1, true)) then res[#res + 1] = name end
+    end
+    table.sort(res)
+    return res
+end
+
+local function run_cmd(src, id)
+    local f, err = load(src, "=bridge", "t", _ENV)
+    local out
+    if not f then
+        out = "LOADERR " .. tostring(err)
+    else
+        local ok, res = xpcall(f, debug.traceback)
+        out = ok and ser(res) or ("ERR " .. tostring(res))
+    end
+    fs.write(OUT, "--id:" .. id .. "\n" .. out)
+end
+
+re.on_pre_application_entry("UpdateBehavior", function()
+    tick = tick + 1
+    if tick % 10 ~= 0 then return end
+    local ok, src = pcall(fs.read, CMD)
+    if not ok or src == nil or src == "" then return end
+    local id = src:match("^%-%-id:(%S+)")
+    if not id or id == last_id then return end
+    last_id = id
+    run_cmd(src, id)
+end)
+
+log.info("[re9coop devbridge] ready")

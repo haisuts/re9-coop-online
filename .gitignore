@@ -1,0 +1,7 @@
+_deps/
+_backup/
+*.zip
+build/
+re9coop/plugin/build/
+dist/
+__pycache__/
