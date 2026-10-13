@@ -83,6 +83,65 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
   stay collectable (240 of those were freed earlier without trouble). Don't use "Reset scripts" while
   testing; restart the game instead. After a crash the game recompiles shaders (~2-3 min).
 
+- 2026-10-13 20:52:46 — APPCRASH c0000005 at re9.exe+0xcde323 (no REFramework dump), ~2 s after
+  calling the local weapon's `app.EPVExpertMuzzleFlashCustom:play(puppetWeaponGO, nil)`; the puppet weapon
+  is a bare GameObject (Transform + Mesh). Never hand game effect components a foreign GameObject.
+
+- 2026-10-13 21:01:54 — c0000005 in `app.ShellManager.setupShell` ~1 s after calling
+  `ShellGenerater.requestShellInstance(vec3, Quaternion, info)` with `getShellRequestInfo()`'s default
+  object (Owner/GenerateOwner set by us, MultiStatus nil). Don't fake bullets.
+- 2026-10-13 ~20:57 — not a crash, a game over: zombie spawned with drivers "disabled" through
+  `set_Enabled` (doesn't exist on drivers: they're `app.CharacterDriver`, switch is `set_IsEnable`)
+  grabbed and killed Grace. Game over -> Continue restores the last save (ammo etc.).
+
+## Enemy recon (Chap3_02)
+
+- `CharacterManager:get_EnemyContextList()` -> 40 `app.EnemyContext` per chapter, spawned or not.
+  ID = `app.ContextID` wrapping a `System.Guid` from the scene data (same on both PCs).
+  `get_KindID()` (cp_B000 zombie, cp_B001..7, cp_C100...), `get_IsSpawn()`, `get_IsDead()`,
+  `get_HitPoint()` (`get_CurrentHitPoint`, `addDamageHitPoint(int, bool, bool)`), `get_GameObject()`.
+- Spawn control (scene component, e.g. `app.Cp_B000SpawnParam` : `app.CharacterSpawnParamBase`) from
+  `CharacterManager:getSpawnDataRef(id):get_SpawnControl()`: `requestSpawn()`, `requestSuspend()`,
+  `requestKill()`, `requestResume()`, `getSpawnInstance()` -> GameObject. Verified spawn + kill.
+- AI off: `ctx:get_CharacterUpdaterBase():get_ThinkDriver():set_IsEnable(false)` (+ LockOnTargetDriver).
+  Zombie then stands still (0 drift over 4 s). Keep AttackDamageDriver on (it also takes damage).
+  A freshly spawned enemy stays `DrawSelf=false` if AI is off from frame 1: set it true.
+- `GameObject:set_UpdateSelf(false)` freezes an enemy completely; writing joint local rotations then
+  poses it (zombie mirrored Grace: 64 of its 78 joints share player joint names). But a frozen enemy
+  takes NO hits (no damage calls at all).
+- `CharacterManager:requestWarp(id, Nullable<vec3>, Nullable<Quaternion>)` with plain vec3/quat from
+  Lua -> enemy flung to ~1e27. Set the Transform position directly instead.
+- Damage pipeline: `app.HitController.requestDamage(attackerHC, u32 hash, DamageUserData, string, vec3,
+  WeaponID[, HC])`, `callbackDamageCalc(DamageInfo)`, `app.HitPoint.addDamageHitPoint(int, bool, bool)`.
+- **Verified client-puppet recipe (21:08-21:12):**
+  1. `spawnControl:requestSpawn()`; wait until `getSpawnInstance()` exists AND `get_HasCompletedSpawn()`
+     AND `go:get_UpdateSelf()` (3-4 frames). Turning AI off earlier blocks spawn completion (the enemy
+     stays asleep at its spawn point, and the spawn later overwrites our position/draw).
+  2. AI off: updater `get_ThinkDriver()` + `get_LockOnTargetDriver()` `:set_IsEnable(false)`. Keep
+     AttackDamageDriver ON. `app.CharacterOutOfAreaDriver` (component) `set_IsEnable(false)` and force
+     `set_UpdateSelf(true)` / `set_DrawSelf(true)` every frame, or a far enemy falls asleep again.
+  3. Move with `CharacterManager:requestWarp(id, Nullable<vec3>, Nullable<Quaternion>)` built by hand:
+     `ValueType.new(System.Nullable`1<via.vec3>)`, byte 0 = 1, value floats at +16 (quat x,y,z,w at
+     +16..+28). Plain Transform:set_Position is undone by the CharacterController; PostureData is
+     rewritten from the transform; CharacterController:warp() didn't help on a corpse.
+  4. Pose: write joint local rotations in `re.on_application_entry("LateUpdateBehavior")` (after the
+     enemy's own Motion) — sticks while its idle animation runs.
+  5. Client hits register on such an enemy: one revolver round -> `HitPoint:addDamageHitPoint(1579, false,
+     true)` + `addDamageReactionHP(900)` on that enemy's HitPoint (address matches ctx:get_HitPoint()),
+     HP 580 -> 0, dead. No requestDamage/callbackDamageCalc in that path. So: pre-hook these two on
+     puppet HitPoints, forward to host, SKIP_ORIGINAL.
+- Testing ammo: this save has 1 revolver round (arm0400 is the revolver). Pause menu "Перезапустить" ->
+  Up -> Enter restores it (~20 s).
+
+## Shot recon (pistol arm0400, Grace, Chap3_02)
+
+- One shot = `EPVExpertMuzzleFlashCustom.play(GO, Nullable<int>)` once on `arm0400`, plus
+  `soundlib.SoundContainer.trigger(u32 id, GO a, GO b, u32, bool, u32, CallbackType, 4x Action)` calls:
+  shot-only ids on arm0400 2306885167, 3161648387, 4147811264, 502346124, 727472596; aim raise/lower
+  1618725184 / 1659952173 (also seen without firing); empty-gun click 1829826749 (a=arm0400 b=cp_A100);
+  bullet `PoolingObject_PlayerStraightShell_0` 1292272569. Shells: `app.ShellGenerater.requestShellInstance`.
+- WinDrive: `mdown 960 540 right` (aim) + `click 960 540` (fire) + `mup right`.
+
 ## Automation notes (1920x1080 borderless)
 
 - Title: Enter -> "Основной сюжет" -> Enter = "Продолжить" (loads last save, ~20 s).
