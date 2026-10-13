@@ -5,3 +5,5 @@ build/
 re9coop/plugin/build/
 dist/
 __pycache__/
+tools/luacheck/obj/
+tools/luacheck/*.exe
