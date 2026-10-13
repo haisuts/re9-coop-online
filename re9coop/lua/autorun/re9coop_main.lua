@@ -37,11 +37,12 @@ local cfg = {
     loopback_face = true,     -- self test: the echo faces you (mirror) instead of copying your heading
     loopback_delay_ms = 150,  -- self test: simulated one-way latency
     shot_fx = true,           -- partner's muzzle flash light and gun sounds
-    flash_intensity = 6000,
-    flash_radius = 6.0,
+    flash_power = 2000,       -- muzzle flash light (the game's own flashlight fill light is 100)
+    flash_radius = 5.0,
     enemy_sync = true,        -- share the host's enemies
     enemy_hz = 15,            -- enemy updates per second (host)
     enemy_posed = 4,          -- how many enemies nearest to the guest get their full skeleton
+    world_sync = true,        -- share door pushes and pickups
 }
 
 local function load_cfg()
@@ -71,6 +72,8 @@ local TYPE_DUMMYSKEL = sdk.typeof("via.motion.DummySkeleton")
 local TYPE_SOUND = sdk.typeof("soundlib.SoundContainer")
 local TYPE_POINTLIGHT = sdk.typeof("via.render.PointLight")
 local TYPE_SPOTLIGHT = sdk.typeof("via.render.SpotLight")
+local TYPE_LIGHTSHAFT = sdk.typeof("via.render.LightShaft")
+local TYPE_LENSFLARE = sdk.typeof("via.effect.lensflare.LensflarePlayer")
 local TYPE_FLASHLIGHT = sdk.typeof("app.FlashLightController")
 local FLAG_FLASHLIGHT = 32
 local T_APP = sdk.find_type_definition("via.Application")
@@ -285,6 +288,7 @@ local MSG_HELLO, MSG_APPEAR, MSG_POSE, MSG_PING, MSG_PONG, MSG_BYE, MSG_REQ_APPE
 local MSG_SHOT, MSG_SOUND = 9, 10
 local MSG_ENEMY, MSG_ENEMY_SKEL, MSG_REQ_ENEMY_SKEL, MSG_ENEMY_DAMAGE = 11, 12, 13, 14
 local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
+local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
 local function q16(v)
@@ -513,7 +517,10 @@ function Puppet:set_visible(v)
     self.root:call("set_DrawSelf", v)
     for _, go in ipairs(self.parts) do go:call("set_DrawSelf", v) end
     if self.weapon then self.weapon:call("set_DrawSelf", v and self.weapon_mesh ~= "") end
-    if self.spot and not v then self.spot:call("set_Enabled", false) end
+    if not v and self.torch and self.torch_on then
+        rig_enable(self.torch, false, false, false)
+        self.torch_on = false
+    end
 end
 
 -- A bare mesh on the R_Wep joint: just the look of the gun, none of its game logic.
@@ -540,62 +547,94 @@ function Puppet:set_weapon(mesh_path, mat_path)
     self.weapon:call("set_DrawSelf", self.visible and mesh_path ~= "")
 end
 
+-- Lights: a light component made with createComponent() ignores its intensity / cone / spread (they
+-- read back 0), so the puppet's lights come from the game's own flashlight pool prefab (a configured
+-- SpotLight with a PointLight, light shaft and lens flare under it). One copy is the flashlight, one
+-- the muzzle flash.
+local LIGHT_RIG_PFB = "AppSystem/Character/CharacterPrefab/PlayerCommon/Prefab/PlayerFlashLightPoolObject.pfb"
+
+local function light_rig(at)
+    local pf = load_prefab(LIGHT_RIG_PFB)
+    if pf == nil or not pf:call("get_Ready") then return nil end
+    local go = pf:call("instantiate(via.vec3)", at)
+    if go == nil then return nil end
+    local rig = { go = go:add_ref(), spot = go:call("getComponent(System.Type)", TYPE_SPOTLIGHT) }
+    local c = go:call("get_Transform"):call("get_Child")
+    while c do
+        local cgo = c:call("get_GameObject")
+        local n = cgo:call("get_Name")
+        if n == "PointLight" then rig.point = cgo:call("getComponent(System.Type)", TYPE_POINTLIGHT) end
+        if n == "LightShaft" then rig.shaft = cgo:call("getComponent(System.Type)", TYPE_LIGHTSHAFT) end
+        if n == "LensFlare" then rig.flare = cgo:call("getComponent(System.Type)", TYPE_LENSFLARE) end
+        c = c:call("get_Next")
+    end
+    return rig
+end
+
+local function rig_enable(rig, spot, point, extras)
+    if rig == nil then return end
+    if rig.spot then rig.spot:call("set_Enabled", spot) end
+    if rig.point then rig.point:call("set_Enabled", point) end
+    if rig.shaft then pcall(rig.shaft.call, rig.shaft, "set_Enabled", extras) end
+    if rig.flare then pcall(rig.flare.call, rig.flare, "set_Enabled", extras) end
+end
+
 -- Muzzle flash: a short burst of warm point light at the gun. The game's own muzzle-flash effect
 -- can't be used here (handing it the puppet's bare gun object crashed the game).
 function Puppet:flash(t_now)
     if self.state ~= "ready" or not self.visible then return end
-    if self.light == nil then
-        local go = M_GO_CREATE:call(nil, "re9coop_" .. self.name .. "_flash")
-        if go == nil then return end
-        self.light_go = go:add_ref()
-        local light = go:call("createComponent(System.Type)", TYPE_POINTLIGHT)
-        if light == nil then return end
-        self.light = light
-        local t = go:call("get_Transform")
-        t:call("setParent(via.Transform, System.Boolean)", self.root:call("get_Transform"), false)
-        t:call("set_ParentJoint", "R_Wep")
-        t:call("set_LocalPosition", Vector3f.new(0, 0, 0))
-        light:call("set_Color", Vector3f.new(1.0, 0.72, 0.38))
-        light:call("set_ShadowEnable", false)
+    local at = self:hand_position()
+    if at == nil then return end
+    if self.muzzle == nil then
+        self.muzzle = light_rig(at)
+        if self.muzzle == nil then return end
+        rig_enable(self.muzzle, false, false, false)
+        if self.muzzle.point then
+            self.muzzle.point:call("set_Color", Vector3f.new(1.0, 0.72, 0.38))
+            self.muzzle.point:call("set_ShadowEnable", false)
+        end
     end
-    self.light:call("set_Radius", cfg.flash_radius)
-    self.light:call("set_Intensity", cfg.flash_intensity)
-    self.light:call("set_Enabled", true)
+    if self.muzzle.point == nil then return end
+    self.muzzle.go:call("get_Transform"):call("set_Position", at)
+    self.muzzle.point:call("set_Radius", cfg.flash_radius + 0.0)
+    self.muzzle.point:call("set_Intensity", cfg.flash_power + 0.0)
+    self.muzzle.point:call("set_Enabled", true)
     self.flash_until = t_now + 0.06
 end
 
--- The partner's flashlight: our own spot light placed where theirs is, relative to their body.
+-- The partner's flashlight, placed where theirs is relative to their body.
 function Puppet:update_flashlight(snap, pos, rot)
-    if snap == nil or snap.light_pos == nil or not self.visible then
-        if self.spot then self.spot:call("set_Enabled", false) end
+    local on = snap ~= nil and snap.light_pos ~= nil and self.visible
+    if not on then
+        if self.torch and self.torch_on then
+            rig_enable(self.torch, false, false, false)
+            self.torch_on = false
+        end
         return
     end
-    if self.spot == nil then
-        if self.spot_failed then return end
-        local go = M_GO_CREATE:call(nil, "re9coop_" .. self.name .. "_flashlight")
-        local spot = go and go:call("createComponent(System.Type)", TYPE_SPOTLIGHT)
-        if spot == nil then self.spot_failed = true return end
-        self.spot_go, self.spot = go:add_ref(), spot
-        spot:call("set_Color", Vector3f.new(1, 1, 1))
-        pcall(function() spot:call("set_Temperature", 6400.0) end)
-        pcall(function() spot:call("set_ReferenceEffectiveRange", 10.0) end)
-        spot:call("set_ShadowEnable", true)
+    if self.torch == nil then
+        self.torch = light_rig(pos)
+        if self.torch == nil then return end
     end
-    local t = self.spot_go:call("get_Transform")
+    local t = self.torch.go:call("get_Transform")
     t:call("set_Position", pos + rot * snap.light_pos)
     t:call("set_Rotation", rot * snap.light_rot)
-    self.spot:call("set_Intensity", snap.light_intensity)
-    pcall(function()
-        self.spot:call("set_Cone", snap.light_cone)
-        self.spot:call("set_Spread", snap.light_spread)
-    end)
-    self.spot:call("set_Enabled", true)
+    local spot = self.torch.spot
+    if spot then
+        spot:call("set_Intensity", snap.light_intensity + 0.0)
+        spot:call("set_Cone", snap.light_cone + 0.0)
+        spot:call("set_Spread", snap.light_spread + 0.0)
+    end
+    if not self.torch_on then
+        rig_enable(self.torch, true, true, true)
+        self.torch_on = true
+    end
 end
 
 function Puppet:update_fx(t_now)
     if self.flash_until and t_now >= self.flash_until then
         self.flash_until = nil
-        if self.light then self.light:call("set_Enabled", false) end
+        if self.muzzle and self.muzzle.point then self.muzzle.point:call("set_Enabled", false) end
     end
 end
 
@@ -613,14 +652,14 @@ function Puppet:head_position()
 end
 
 function Puppet:destroy()
-    self.jmap, self.j_root, self.j_hip, self.weapon_meshc, self.light, self.spot = nil, nil, nil, nil, nil, nil
-    destroy_go(self.light_go)
-    destroy_go(self.spot_go)
-    self.spot_go = nil
+    self.jmap, self.j_root, self.j_hip, self.weapon_meshc = nil, nil, nil, nil
+    if self.muzzle then destroy_go(self.muzzle.go) end
+    if self.torch then destroy_go(self.torch.go) end
+    self.muzzle, self.torch, self.torch_on = nil, nil, false
     destroy_go(self.weapon)
     for _, go in ipairs(self.parts) do destroy_go(go) end
     destroy_go(self.root)
-    self.parts, self.root, self.weapon, self.light_go, self.state = {}, nil, nil, nil, "gone"
+    self.parts, self.root, self.weapon, self.state = {}, nil, nil, "gone"
 end
 
 -------------------------------------------------------------------------------------------------
@@ -629,6 +668,7 @@ end
 local LOOPBACK_ID = "1"
 local peers = {}          -- steam id string -> peer
 local enemy_ctrl, enemy_recv, enemies_reset -- set in the "shared enemies" section
+local world_ctrl, world_reset -- set in the "shared doors and pickups" section
 local loopback = false
 local stats = { tx = 0, rx = 0, tx_bytes = 0, rx_bytes = 0, rate_t = 0, tx_kbps = 0, rx_kbps = 0 }
 
@@ -694,6 +734,7 @@ on_player_lost = function()
         p.snaps = {}
     end
     if enemies_reset then enemies_reset(false) end
+    if world_reset then world_reset() end
 end
 
 local function send_ctrl(data, to)
@@ -743,6 +784,8 @@ local function on_ctrl(from, data)
         drop_peer(from)
     elseif kind >= MSG_ENEMY and kind <= MSG_ENEMY_PRESENCE and enemy_ctrl then
         enemy_ctrl(from, kind, data)
+    elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN) and world_ctrl then
+        world_ctrl(from, kind, data)
     end
 end
 
@@ -1453,6 +1496,167 @@ local function enemies_late(t_now)
 end
 
 
+-------------------------------------------------------------------------------------------------
+-- shared doors and pickups
+-------------------------------------------------------------------------------------------------
+-- Doors (app.GmDoorV3) swing open when pushed: one GmDoorV3.addForce(RequestInfo) call. Every push
+-- here (except the door's own auto-close) is sent to the partner, whose game pushes the same door the
+-- same way. Pickups: when an item (app.ItemCore) is picked up here, the partner's copy of it is
+-- despawned through its ItemContext (set_IsSpawn(false)), the way the game removes taken items.
+-- Doors and items are matched by their scene GUIDs (GimmickCore / ItemCore context IDs). Items made
+-- at runtime (enemy drops) have per-PC IDs and aren't shared. Key-locked doors aren't unlocked for
+-- the partner yet.
+local DOOR_AUTO_CLOSE = 1
+local T_DOOR_REQUEST = "app.GmDoorV3.RequestInfo"
+local M_DOOR_FORCE = sdk.find_type_definition("app.GmDoorV3"):get_method("addForce(app.GmDoorV3.RequestInfo)")
+local M_ITEM_PICKED = sdk.find_type_definition("app.ItemCore"):get_method("notifyPickupped(System.Boolean)")
+local TYPE_DOOR = sdk.typeof("app.GmDoorV3")
+local TYPE_ITEM = sdk.typeof("app.ItemCore")
+local TYPE_GIMMICK_CORE = sdk.typeof("app.GimmickCore")
+local T_SCENE_MANAGER = sdk.find_type_definition("via.SceneManager")
+
+local world = {
+    doors = {}, door_ids = {},  -- id -> GmDoorV3, GmDoorV3 address -> id
+    items = {}, item_ids = {},  -- id -> ItemCore, ItemCore address -> id
+    index_t = 0, index_chapter = "",
+    applying = false,           -- true while we push a door / remove an item for the partner
+    applied_at = {},            -- door id -> when we last pushed it for the partner (echo guard)
+    sent_at = {},               -- door id -> when we last sent a push (rate limit)
+    out = {},
+    stats = { doors_sent = 0, doors_applied = 0, items_sent = 0, items_applied = 0 },
+}
+
+world_reset = function()
+    world.doors, world.door_ids, world.items, world.item_ids = {}, {}, {}, {}
+    world.index_t, world.applied_at, world.sent_at, world.out = 0, {}, {}, {}
+end
+
+local function scene_components(type_obj)
+    local sm = sdk.get_native_singleton("via.SceneManager")
+    local scene = sm and sdk.call_native_func(sm, T_SCENE_MANAGER, "get_CurrentScene")
+    local arr = scene and scene:call("findComponents(System.Type)", type_obj)
+    return arr and arr:get_elements() or {}
+end
+
+local function id_string(holder)
+    local ok, id = pcall(function() return holder:call("get_ContextID"):call("ToString") end)
+    return ok and id or nil
+end
+
+local function refresh_world(t_now)
+    if t_now < world.index_t and world.index_chapter == me.chapter then return end
+    world.index_t, world.index_chapter = t_now + 5, me.chapter
+    local doors, door_ids, items, item_ids = {}, {}, {}, {}
+    for _, d in ipairs(scene_components(TYPE_DOOR)) do
+        local core = d:call("get_GameObject"):call("getComponent(System.Type)", TYPE_GIMMICK_CORE)
+        local id = core and id_string(core)
+        if id then doors[id], door_ids[d:get_address()] = d, id end
+    end
+    for _, it in ipairs(scene_components(TYPE_ITEM)) do
+        local id = id_string(it)
+        if id then items[id], item_ids[it:get_address()] = it, id end
+    end
+    world.doors, world.door_ids, world.items, world.item_ids = doors, door_ids, items, item_ids
+end
+
+local function world_shared()
+    if me.go == nil or not cfg.world_sync then return false end
+    if loopback then return true end
+    local st_net = session.status
+    return st_net ~= nil and st_net.state == "in_lobby" and session.last_members ~= ""
+end
+
+sdk.hook(M_DOOR_FORCE, function(args)
+    if world.applying or not world_shared() then return end
+    local id = world.door_ids[sdk.to_int64(args[2])]
+    if id == nil then return end
+    local t = now()
+    if t - (world.applied_at[id] or -10) < 0.5 or t - (world.sent_at[id] or -10) < 0.15 then return end
+    local info = sdk.to_managed_object(args[3])
+    if info == nil then return end
+    local action = info:get_field("ActionType")
+    if action == DOOR_AUTO_CLOSE or #world.out >= 32 then return end
+    world.sent_at[id] = t
+    world.out[#world.out + 1] = string.pack("<Bs1s1BfI4", MSG_DOOR, me.chapter, id, action or 0,
+        info:get_field("Force") or 1.0, (info:get_field("ForceDir") or 1) & 0xFFFFFFFF)
+end, nil)
+
+sdk.hook(M_ITEM_PICKED, function(args)
+    if world.applying or not world_shared() or (sdk.to_int64(args[3]) & 1) == 0 then return end
+    local id = world.item_ids[sdk.to_int64(args[2])]
+    if id and #world.out < 32 then
+        world.out[#world.out + 1] = string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id)
+    end
+end, nil)
+
+world_ctrl = function(from, kind, data)
+    if not world_shared() then return end
+    refresh_world(now())
+    if kind == MSG_DOOR then
+        local _, chapter, id, action, force, dir = string.unpack("<Bs1s1BfI4", data)
+        local door = chapter == me.chapter and world.doors[id]
+        if not door then return end
+        local info = sdk.create_instance(T_DOOR_REQUEST)
+        if info == nil then return end
+        info:set_field("ActionType", action)
+        info:set_field("Force", force)
+        info:set_field("ForceDir", int32(dir))
+        world.applying = true
+        pcall(door.call, door, "addForce(app.GmDoorV3.RequestInfo)", info)
+        world.applying = false
+        world.applied_at[id] = now()
+        world.stats.doors_applied = world.stats.doors_applied + 1
+    elseif kind == MSG_ITEM_TAKEN then
+        local _, chapter, id = string.unpack("<Bs1s1", data)
+        local item = chapter == me.chapter and world.items[id]
+        if not item then return end
+        local ctx = item:get_field("_Context")
+        if ctx and ctx:call("get_IsSpawn") then
+            world.applying = true
+            pcall(ctx.call, ctx, "set_IsSpawn", false)
+            world.applying = false
+            world.stats.items_applied = world.stats.items_applied + 1
+        end
+    end
+end
+
+local function world_late(t_now)
+    if not world_shared() then return end
+    refresh_world(t_now)
+    if #world.out == 0 then return end
+    local out = world.out
+    world.out = {}
+    for _, blob in ipairs(out) do
+        local kind = string.byte(blob, 1)
+        send_ctrl(blob)
+        if kind == MSG_DOOR then
+            world.stats.doors_sent = world.stats.doors_sent + 1
+        else
+            world.stats.items_sent = world.stats.items_sent + 1
+        end
+    end
+end
+
+-- Teleport our player 1 m behind the partner (same chapter only), like walking up to them.
+local function partner_to_follow()
+    for id, p in pairs(peers) do
+        if id ~= LOOPBACK_ID and #p.snaps > 0 then return p end
+    end
+    local echo = peers[LOOPBACK_ID]
+    return echo and #echo.snaps > 0 and echo or nil
+end
+
+local function teleport_to_partner()
+    local p = partner_to_follow()
+    if p == nil or me.pc == nil then return "no partner to go to" end
+    if p.chapter ~= me.chapter then return "your partner is in " .. p.chapter end
+    local s = p.snaps[#p.snaps]
+    local pos = s.pos + s.rot * Vector3f.new(0, 0, -1.0)
+    local cm = character_manager()
+    local ok = pcall(cm.call, cm, WARP_SIG, me.pc:call("get_ID"), nullable_vec3(pos), nullable_quat(s.rot))
+    return ok and ("went to " .. p.name) or "couldn't move you"
+end
+
 local function set_loopback(v)
     loopback = v
     if net then net.set_loopback(v, cfg.loopback_delay_ms) end
@@ -1580,9 +1784,18 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("send error: %s", tostring(err)) end
     ok, err = pcall(enemies_late, t_now)
     if not ok then say("enemy error: %s", tostring(err)) end
+    ok, err = pcall(world_late, t_now)
+    if not ok then say("world error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
+    -- partner in another chapter: say where, so the other player can catch up
+    for id, p in pairs(peers) do
+        if id ~= LOOPBACK_ID and p.chapter ~= "" and me.chapter ~= "" and p.chapter ~= me.chapter then
+            local msg = string.format("%s is in %s (you: %s)", p.name, p.chapter, me.chapter)
+            draw.text(msg, 960 - #msg * 3.5, 40, 0xFF80E0FF)
+        end
+    end
     if not cfg.nametags then return end
     for _, p in pairs(peers) do
         local pup = p.puppet
@@ -1633,6 +1846,8 @@ re.on_draw_ui(function()
         imgui.text("Lobby " .. st.lobby .. ", " .. #st.members .. " player(s)")
         if imgui.button("Invite friends (Steam overlay)") then net.invite() end
         imgui.same_line()
+        if imgui.button("Teleport to partner") then say("%s", teleport_to_partner()) end
+        imgui.same_line()
         if imgui.button("Leave") then
             send_ctrl(string.pack("<B", MSG_BYE))
             net.leave()
@@ -1676,6 +1891,8 @@ re.on_draw_ui(function()
         imgui.text(string.format("Shared enemies: you run %d, your partner runs %d. Hits sent %d, received %d. Handovers %d.",
             foes.stats.owned, foes.stats.puppets, foes.stats.dmg_sent, foes.stats.dmg_applied, foes.stats.handovers))
     end
+    imgui.text(string.format("Doors: sent %d, opened for partner %d. Pickups: sent %d, removed %d.",
+        world.stats.doors_sent, world.stats.doors_applied, world.stats.items_sent, world.stats.items_applied))
 
     imgui.separator()
     local c, v = imgui.checkbox("Self test (see your own echo next to you)", loopback)
@@ -1684,6 +1901,7 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Self test: echo faces you", cfg.loopback_face); if c then cfg.loopback_face, changed = v, true end
     c, v = imgui.checkbox("Partner's muzzle flash and gun sounds", cfg.shot_fx); if c then cfg.shot_fx, changed = v, true end
     c, v = imgui.checkbox("Share enemies (both players need it on)", cfg.enemy_sync); if c then cfg.enemy_sync, changed = v, true end
+    c, v = imgui.checkbox("Share doors and pickups", cfg.world_sync); if c then cfg.world_sync, changed = v, true end
     c, v = imgui.checkbox("Name tags", cfg.nametags); if c then cfg.nametags, changed = v, true end
     c, v = imgui.slider_int("Pose updates per second", cfg.send_hz, 5, 30); if c then cfg.send_hz, changed = v, true end
     c, v = imgui.slider_float("Smoothing delay (s)", cfg.interp_delay, 0.05, 0.4); if c then cfg.interp_delay, changed = v, true end
@@ -1703,4 +1921,5 @@ else
 end
 
 -- dev hooks for automated tests (harmless in normal play)
-_G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes }
+_G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes,
+    teleport_to_partner = teleport_to_partner, world = world }

@@ -199,6 +199,30 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
 - Grace's flashlight can't be switched on in Chap3_02 (`FlashLightBlackboardUnit.Core:
   set_SwitchLightRequestImmediately(Nullable<bool>)` ignored, `_IsLighting` reset each frame).
 
+
+## v0.4.0 status (2026-10-14 01:20) — verified on one PC
+
+- Lights fixed: runtime `createComponent` lights ignore intensity/cone; puppets now instantiate the
+  game's `AppSystem/Character/CharacterPrefab/PlayerCommon/Prefab/PlayerFlashLightPoolObject.pfb`
+  (root SpotLight 10000/30 deg, children PointLight 100, LightShaft, LensFlare). Plain setters work on
+  it. Muzzle flash = its PointLight, warm (1, .72, .38), 2000, r 5 m, 60 ms (screens l4). Flashlight =
+  its SpotLight placed from the pose's light block (screen l5: beam on the pillar ahead of the echo).
+  NB `sdk.float_to_ptr(x)` as a float argument writes 0.0 — pass plain Lua numbers.
+- Teleport to partner: `requestWarp(player ctx id, Nullable pos, Nullable rot)` 1 m behind; landed
+  within 1 cm.
+- Doors: 57 `app.GmDoorV3` per chapter, id = `GimmickCore:get_ContextID()`. A push is one
+  `addForce(RequestInfo{ActionType, Force, ForceDir})` (class, not value type). Replay with
+  `sdk.create_instance("app.GmDoorV3.RequestInfo")` opened Gm01_102 remotely. Hook -> MSG_DOOR ->
+  loopback -> addForce again: sent 1 / applied 1, no echo resend.
+  `IGimmickDoor.requestInteractOpen(...)` did nothing on a far door.
+- Pickups: 181 `app.ItemCore` (with InteractActionItemPickupHolder); id = `ItemCore:get_ContextID()`.
+  Real pickup (ink ribbon, F) = `pickup` -> `onPickup` -> `notifyPickupped(true)`. Removing:
+  `ItemCore._Context:set_IsSpawn(false)` -> item hidden by the game (Draw false).
+- Chapter jump candidates (not used): `MainGameFlowManager:setOverrideNextJumpScene(string)` +
+  `requestContinueToTransitionGame()`.
+- FPS camera keeps its own yaw after a player warp: WinDrive `rel` turns of >600 px per event are
+  unreliable; step in <=600 px chunks (45.5 px per degree at default sensitivity).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
