@@ -18,8 +18,8 @@
 --   host's data. Damage the guest deals (HitPoint.addDamageHitPoint / addDamageReactionHP) is caught
 --   before it lands and sent to the host, which applies it to the real enemy.
 
-local VERSION = "0.3.0"
-local PROTO = 2
+local VERSION = "0.4.0"
+local PROTO = 3
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -70,6 +70,9 @@ local TYPE_MESH = sdk.typeof("via.render.Mesh")
 local TYPE_DUMMYSKEL = sdk.typeof("via.motion.DummySkeleton")
 local TYPE_SOUND = sdk.typeof("soundlib.SoundContainer")
 local TYPE_POINTLIGHT = sdk.typeof("via.render.PointLight")
+local TYPE_SPOTLIGHT = sdk.typeof("via.render.SpotLight")
+local TYPE_FLASHLIGHT = sdk.typeof("app.FlashLightController")
+local FLAG_FLASHLIGHT = 32
 local T_APP = sdk.find_type_definition("via.Application")
 local ACT = "System.Action`1<soundlib.SoundManager.RequestInfo>"
 local M_SND_FULL = sdk.find_type_definition("soundlib.SoundContainer"):get_method(
@@ -169,6 +172,7 @@ local me = {
     appear = nil, appear_blob = nil, appear_key = "", next_appear_check = 0,
     weapon_blob = nil, next_weapon_check = 0,
     weapon_go_addr = 0, weapon_sc = nil, player_sc = nil,
+    flashlight = nil,      -- app.FlashLightController under "PlayerFlashLightController"
 }
 
 local on_player_lost -- set below: puppets are rebuilt whenever our player object goes away
@@ -177,7 +181,7 @@ local function forget_player()
     if me.go ~= nil and on_player_lost then on_player_lost() end
     me.pc, me.go, me.go_addr = nil, nil, 0
     me.joints, me.names, me.j_root, me.j_hip = nil, nil, nil, nil
-    me.weapon_go_addr, me.weapon_sc, me.player_sc = 0, nil, nil
+    me.weapon_go_addr, me.weapon_sc, me.player_sc, me.flashlight = 0, nil, nil, nil
     me.chapter, me.kind = "", ""
 end
 
@@ -261,6 +265,14 @@ local function refresh_player()
         me.next_appear_check = 0
         me.weapon_blob, me.next_weapon_check = nil, 0
         me.player_sc = go:call("getComponent(System.Type)", TYPE_SOUND)
+        local c = go:call("get_Transform"):call("get_Child")
+        while c do
+            local cgo = c:call("get_GameObject")
+            if cgo and cgo:call("get_Name") == "PlayerFlashLightController" then
+                me.flashlight = cgo:call("getComponent(System.Type)", TYPE_FLASHLIGHT)
+            end
+            c = c:call("get_Next")
+        end
         say("player %s in %s (%d joints)", me.kind, me.chapter, #me.joints)
     end
     return true
@@ -272,6 +284,7 @@ end
 local MSG_HELLO, MSG_APPEAR, MSG_POSE, MSG_PING, MSG_PONG, MSG_BYE, MSG_REQ_APPEAR, MSG_WEAPON = 1, 2, 3, 4, 5, 6, 7, 8
 local MSG_SHOT, MSG_SOUND = 9, 10
 local MSG_ENEMY, MSG_ENEMY_SKEL, MSG_REQ_ENEMY_SKEL, MSG_ENEMY_DAMAGE = 11, 12, 13, 14
+local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
 local function q16(v)
@@ -326,6 +339,10 @@ local function local_flags()
         if common:call("get_IsShooting") then f = f | 8 end
     end
     if me.pc:call("get_IsFPSCharacter") then f = f | 16 end
+    local fc = me.flashlight
+    if fc and fc:get_field("_IsLighting") and fc:get_field("_CurrentLightObject") and fc:get_field("_CurrentLight") then
+        f = f | FLAG_FLASHLIGHT
+    end
     return f
 end
 
@@ -343,7 +360,25 @@ local function msg_pose(t)
     seq = (seq + 1) % 65536
     local q = {}
     for _, j in ipairs(me.joints) do pack_quat(j:call("get_LocalRotation"), q) end
-    return head .. string.pack("<" .. string.rep("h", #q), table.unpack(q))
+    local msg = head .. string.pack("<" .. string.rep("h", #q), table.unpack(q))
+    -- flashlight: where the beam is relative to the body, and how it looks
+    local fc = me.flashlight
+    if fc and fc:get_field("_IsLighting") then
+        local lgo = fc:get_field("_CurrentLightObject")
+        local light = fc:get_field("_CurrentLight")
+        if lgo and light then
+            local lt = lgo:call("get_Transform")
+            local inv = rot:inverse()
+            local lp = inv * (lt:call("get_Position") - pos)
+            local lq = {}
+            pack_quat(inv * lt:call("get_Rotation"), lq)
+            local cone, spread = 30, 10
+            pcall(function() cone, spread = light:call("get_Cone"), light:call("get_Spread") end)
+            msg = msg .. string.pack("<fffhhhhfff", lp.x, lp.y, lp.z, lq[1], lq[2], lq[3], lq[4],
+                light:call("get_Intensity") or 1500, cone, spread)
+        end
+    end
+    return msg
 end
 
 local function read_pose(data)
@@ -359,6 +394,12 @@ local function read_pose(data)
     for i = 1, n do
         qx, qy, qz, qw, pos = string.unpack("<hhhh", data, pos)
         s.j[i] = unpack_quat(qx, qy, qz, qw)
+    end
+    if s.flags & FLAG_FLASHLIGHT ~= 0 and #data >= pos + 31 then
+        local cone, spread
+        x, y, z, qx, qy, qz, qw, s.light_intensity, cone, spread, pos = string.unpack("<fffhhhhfff", data, pos)
+        s.light_pos, s.light_rot = Vector3f.new(x, y, z), unpack_quat(qx, qy, qz, qw)
+        s.light_cone, s.light_spread = cone, spread
     end
     return s
 end
@@ -472,6 +513,7 @@ function Puppet:set_visible(v)
     self.root:call("set_DrawSelf", v)
     for _, go in ipairs(self.parts) do go:call("set_DrawSelf", v) end
     if self.weapon then self.weapon:call("set_DrawSelf", v and self.weapon_mesh ~= "") end
+    if self.spot and not v then self.spot:call("set_Enabled", false) end
 end
 
 -- A bare mesh on the R_Wep joint: just the look of the gun, none of its game logic.
@@ -522,6 +564,34 @@ function Puppet:flash(t_now)
     self.flash_until = t_now + 0.06
 end
 
+-- The partner's flashlight: our own spot light placed where theirs is, relative to their body.
+function Puppet:update_flashlight(snap, pos, rot)
+    if snap == nil or snap.light_pos == nil or not self.visible then
+        if self.spot then self.spot:call("set_Enabled", false) end
+        return
+    end
+    if self.spot == nil then
+        if self.spot_failed then return end
+        local go = M_GO_CREATE:call(nil, "re9coop_" .. self.name .. "_flashlight")
+        local spot = go and go:call("createComponent(System.Type)", TYPE_SPOTLIGHT)
+        if spot == nil then self.spot_failed = true return end
+        self.spot_go, self.spot = go:add_ref(), spot
+        spot:call("set_Color", Vector3f.new(1, 1, 1))
+        pcall(function() spot:call("set_Temperature", 6400.0) end)
+        pcall(function() spot:call("set_ReferenceEffectiveRange", 10.0) end)
+        spot:call("set_ShadowEnable", true)
+    end
+    local t = self.spot_go:call("get_Transform")
+    t:call("set_Position", pos + rot * snap.light_pos)
+    t:call("set_Rotation", rot * snap.light_rot)
+    self.spot:call("set_Intensity", snap.light_intensity)
+    pcall(function()
+        self.spot:call("set_Cone", snap.light_cone)
+        self.spot:call("set_Spread", snap.light_spread)
+    end)
+    self.spot:call("set_Enabled", true)
+end
+
 function Puppet:update_fx(t_now)
     if self.flash_until and t_now >= self.flash_until then
         self.flash_until = nil
@@ -543,8 +613,10 @@ function Puppet:head_position()
 end
 
 function Puppet:destroy()
-    self.jmap, self.j_root, self.j_hip, self.weapon_meshc, self.light = nil, nil, nil, nil, nil
+    self.jmap, self.j_root, self.j_hip, self.weapon_meshc, self.light, self.spot = nil, nil, nil, nil, nil, nil
     destroy_go(self.light_go)
+    destroy_go(self.spot_go)
+    self.spot_go = nil
     destroy_go(self.weapon)
     for _, go in ipairs(self.parts) do destroy_go(go) end
     destroy_go(self.root)
@@ -669,7 +741,7 @@ local function on_ctrl(from, data)
         p.rtt = now() - t
     elseif kind == MSG_BYE then
         drop_peer(from)
-    elseif kind >= MSG_ENEMY and kind <= MSG_ENEMY_DAMAGE and enemy_ctrl then
+    elseif kind >= MSG_ENEMY and kind <= MSG_ENEMY_PRESENCE and enemy_ctrl then
         enemy_ctrl(from, kind, data)
     end
 end
@@ -740,6 +812,7 @@ local function update_peer(p, t_now)
         if cfg.loopback_face then rot = rot * Quaternion.new(0, 0, 1, 0) end -- turned round to face you
     end
     pup:apply(pos, rot, a, b, f)
+    pup:update_flashlight(f >= 0.5 and b or a, pos, rot)
 end
 
 -------------------------------------------------------------------------------------------------
@@ -748,16 +821,22 @@ end
 local session = { last_members = "", next_ping = 0, next_send = 0, next_join_poll = 0, status = nil }
 
 -------------------------------------------------------------------------------------------------
--- shared enemies (the host decides)
+-- shared enemies: each enemy is run by the player it is closest to
 -------------------------------------------------------------------------------------------------
 -- Enemy contexts are identified by their scene GUID (app.ContextID), the same on both PCs.
--- Host: every spawned enemy -> MSG_ENEMY (unreliable, CH_ENEMY): id, kind, flags, position,
---   rotation, HP, and for the few nearest the guest the full skeleton.
--- Guest: spawns the same enemy through its spawn control, turns its AI off (think + lock-on +
---   out-of-area drivers), keeps it awake, warps it to the host's position every frame and writes the
---   host's joint rotations after its own animation. Its HitPoint is hooked: damage the guest deals is
---   sent to the host (MSG_ENEMY_DAMAGE) instead of landing here. Enemies the host doesn't have are
---   put away. When co-op ends, every enemy gets its AI back.
+-- Ownership: the lobby owner is the arbiter. Twice a second it gives every spawned enemy to the
+--   nearer player (with a few metres of hysteresis; dead enemies keep their owner) and sends the
+--   changes (MSG_ENEMY_OWNERS). An enemy nobody assigned yet belongs to whoever spawned it.
+-- Owner: the enemy's AI runs normally, so it hunts, grabs and hurts that player for real. Its state
+--   goes to the other player 15 times a second (MSG_ENEMY; the nearest few with their full skeleton).
+-- Other player: the same enemy is spawned through its own spawn control, its AI (think, lock-on,
+--   out-of-area drivers) is switched off, and it is warped and posed from the owner's data. Damage
+--   dealt to it is caught before it lands and sent to the owner. The game's own spawn logic is not
+--   allowed to put it away while the owner still has it.
+-- Ownership moving to us: the copy's health is set to the last value we were sent and it gets its AI
+--   back. Ownership moving away: our enemy becomes a puppet.
+-- Each player also reports the enemies it has spawned (MSG_ENEMY_PRESENCE) so the arbiter can hand an
+--   enemy to the guest even when the host's copy is gone.
 local F_SPAWNED, F_DEAD, F_POSE = 1, 2, 4
 local T_NV3 = sdk.find_type_definition("System.Nullable`1<via.vec3>")
 local T_NQ = sdk.find_type_definition("System.Nullable`1<via.Quaternion>")
@@ -768,25 +847,34 @@ local M_ADD_HP = sdk.find_type_definition("app.HitPoint"):get_method(ADD_HP_SIG)
 local M_ADD_RHP = sdk.find_type_definition("app.HitPoint"):get_method(ADD_RHP_SIG)
 local TYPE_OUT_OF_AREA = sdk.typeof("app.CharacterOutOfAreaDriver")
 local ENEMY_HEAD = "<BHds1s1s1Bfffhhhhi4"
+local OWNER_HYSTERESIS = 3.0 -- metres the other player must be closer by before an enemy changes hands
 
 local foes = {
-    role = "off",          -- "host" | "guest" | "off"
+    active = false,        -- sharing enemies with someone right now
+    arbiter = false,       -- we decide who owns what (lobby owner)
+    peer_id = nil,         -- the other player
     index = {}, index_t = 0, index_chapter = "",  -- id -> { ctx, kind, ctl, orphan_since }
-    -- host
+    owner = {},            -- id -> true: ours, false: theirs, nil: not assigned (ours if spawned here)
+    -- sending (enemies we own)
     next_send = 0, seq = 0, skel_sent = {}, joints = {},
-    -- guest
-    states = {},           -- id -> { snaps, last, kind, flags, hp, chapter, next_spawn }
-    puppets = {},          -- id -> { e, ctl, go, upd, kind, jmap, j_hip, hp_addr }
+    next_presence = 0,
+    -- receiving (enemies they own)
+    states = {},           -- id -> { snaps, last, kind, flags, hp, chapter, next_spawn, tries }
+    puppets = {},          -- id -> { e, ctl, go, upd, kind, jmap, j_hip, hp_addr, ctl_addr }
     hp_owner = {},         -- HitPoint address -> enemy id (puppets only)
     ctl_owner = {},        -- spawn control address -> enemy id (puppets only)
+    names = {},            -- kind -> joint names sent by the other player
+    asked = {},            -- kind -> when we last asked for them
+    dmg_out = {},          -- damage caught on puppets, waiting to be sent to the owner
+    bypass = false,        -- true while we apply damage ourselves
     self_call = false,     -- true while we call a spawn control ourselves
-    names = {},            -- kind -> joint names sent by the host
-    asked = {},            -- kind -> when we last asked the host for them
-    dmg_out = {},          -- damage caught on puppets, waiting to be sent to the host
-    bypass = false,        -- true while the host applies a guest's damage
-    stats = { synced = 0, dmg_sent = 0, dmg_applied = 0 },
-    -- one-PC test (dev bridge only): with the self test on, enemy `src` is sent through the loopback
-    -- and what arrives is applied to enemy `dst`, so dst copies src 150 ms late. { src=id, dst=id }
+    -- arbiter
+    next_arbitrate = 0, next_full_owners = 0,
+    presence = {},         -- id -> { pos, dead, t } enemies the other player has spawned
+    stats = { sent = 0, puppets = 0, owned = 0, dmg_sent = 0, dmg_applied = 0, handovers = 0 },
+    -- one-PC test (dev bridge only): with the self test on, enemy `src` (ours) is sent through the
+    -- loopback and what arrives drives enemy `dst` (theirs), so dst copies src 150 ms late; hits on dst
+    -- land on src. { src = id, dst = id, offset = Vector3f? }
     test = nil,
 }
 
@@ -816,7 +904,8 @@ end
 local function refresh_index(t_now)
     if t_now < foes.index_t and foes.index_chapter == me.chapter then return end
     foes.index_t, foes.index_chapter = t_now + 2, me.chapter
-    local list = character_manager() and character_manager():call("get_EnemyContextList")
+    local cm = character_manager()
+    local list = cm and cm:call("get_EnemyContextList")
     if list == nil then return end
     local old, idx = foes.index, {}
     for i = 0, list:call("get_Count") - 1 do
@@ -874,10 +963,10 @@ enemies_reset = function(scene_alive)
         if scene_alive then release_puppet(id, true) end
     end
     foes.puppets, foes.hp_owner, foes.ctl_owner, foes.states, foes.joints = {}, {}, {}, {}, {}
-    foes.index, foes.index_t, foes.skel_sent = {}, 0, {}
+    foes.index, foes.index_t, foes.skel_sent, foes.owner, foes.presence = {}, 0, {}, {}, {}
 end
 
--- Only after the spawn has completed (with AI on): turning AI off earlier leaves it asleep.
+-- Only after the spawn has completed with its AI on: turning AI off earlier leaves it asleep.
 local function puppetize(id, e)
     local ctl = spawn_control(e)
     local go = ctl and ctl:call("getSpawnInstance")
@@ -892,7 +981,38 @@ local function puppetize(id, e)
     if pup.ctl_addr ~= 0 then foes.ctl_owner[pup.ctl_addr] = id end
 end
 
--- host -------------------------------------------------------------------------------------------
+-- Damage the host of the damage message gets applied without being forwarded again.
+local function apply_damage(e, which, dmg, b1, b2)
+    local hp = e.ctx:call("get_HitPoint")
+    if hp == nil then return end
+    foes.bypass = true
+    pcall(function() hp:call(which == 0 and ADD_HP_SIG or ADD_RHP_SIG, dmg, b1, b2) end)
+    foes.bypass = false
+end
+
+-- The enemy comes to us: it keeps the health it had on the other side and gets its AI back.
+local function take_over(id)
+    local pup = foes.puppets[id]
+    local st = foes.states[id]
+    local e = foes.index[id]
+    if e and st and st.hp then
+        local hp = e.ctx:call("get_HitPoint")
+        local cur = hp and hp:call("get_CurrentHitPoint") or 0
+        if cur > st.hp then apply_damage(e, 0, cur - st.hp, false, false) end
+    end
+    if pup then release_puppet(id, true) end
+    foes.states[id] = nil
+    foes.stats.handovers = foes.stats.handovers + 1
+end
+
+local function set_owner(id, mine)
+    if foes.owner[id] == mine then return end
+    foes.owner[id] = mine
+    if mine then take_over(id) end
+    -- becoming theirs: enemies_tick turns our copy into a puppet
+end
+
+-- sending the enemies we own --------------------------------------------------------------------
 
 local function enemy_joints(go, kind)
     local a = go:get_address()
@@ -915,23 +1035,28 @@ local function send_skeleton(kind, names, to)
     send_ctrl(table.concat(t), to)
 end
 
-local function host_send(t_now, guest)
+local function peer_position()
+    local p = foes.peer_id and peers[foes.peer_id]
+    return p and #p.snaps > 0 and p.snaps[#p.snaps].pos or nil, p
+end
+
+local function send_owned(t_now)
     if t_now < foes.next_send then return end
     foes.next_send = t_now + 1 / math.max(1, cfg.enemy_hz)
-    refresh_index(t_now)
-    local gpos = #guest.snaps > 0 and guest.snaps[#guest.snaps].pos or nil
+    local ppos = peer_position()
     local live = {}
     for id, e in pairs(foes.index) do
-        if (foes.test == nil or id == foes.test.src) and e.ctx:call("get_IsSpawn") then
+        local ours = foes.test == nil and foes.owner[id] ~= false or (foes.test and id == foes.test.src)
+        if ours and e.ctx:call("get_IsSpawn") then
             local go = e.ctx:call("get_GameObject")
             if go then
                 local pos = go:call("get_Transform"):call("get_Position")
-                live[#live + 1] = { id = id, e = e, go = go, pos = pos, d = gpos and (pos - gpos):length() or 0 }
+                live[#live + 1] = { id = id, e = e, go = go, pos = pos, d = ppos and (pos - ppos):length() or 0 }
             end
         end
     end
     table.sort(live, function(a, b) return a.d < b.d end)
-    foes.stats.synced = #live
+    foes.stats.owned = #live
     for i, x in ipairs(live) do
         local rot = x.go:call("get_Transform"):call("get_Rotation")
         local hp = x.e.ctx:call("get_HitPoint")
@@ -950,29 +1075,94 @@ local function host_send(t_now, guest)
                 .. string.pack("<" .. string.rep("h", #jq), table.unpack(jq))
             if not foes.skel_sent[x.e.kind] then
                 foes.skel_sent[x.e.kind] = true
-                send_skeleton(x.e.kind, jt.names, guest.id)
+                send_skeleton(x.e.kind, jt.names, foes.peer_id)
             end
         end
-        local n = net.send(msg, false, CH_ENEMY, guest.id)
+        local n = net.send(msg, false, CH_ENEMY, foes.peer_id)
         stats.tx, stats.tx_bytes = stats.tx + n, stats.tx_bytes + #msg * n
     end
     foes.seq = (foes.seq + 1) % 65536
 end
 
-local function host_apply_damage(data)
-    local _, id, which, dmg, b1, b2 = string.unpack("<Bs1Bi4BB", data)
-    if foes.test and id == foes.test.dst then id = foes.test.src end -- one-PC test: hits on the copy land on the original
-    local e = foes.index[id]
-    if e == nil or not e.ctx:call("get_IsSpawn") then return end
-    local hp = e.ctx:call("get_HitPoint")
-    if hp == nil then return end
-    foes.bypass = true
-    pcall(function() hp:call(which == 0 and ADD_HP_SIG or ADD_RHP_SIG, dmg, b1 == 1, b2 == 1) end)
-    foes.bypass = false
-    foes.stats.dmg_applied = foes.stats.dmg_applied + 1
+-- The non-arbiter tells the arbiter which enemies it has spawned and where (puppets included).
+local function send_presence(t_now)
+    if t_now < foes.next_presence then return end
+    foes.next_presence = t_now + 0.5
+    local t = {}
+    local n = 0
+    for id, e in pairs(foes.index) do
+        if e.ctx:call("get_IsSpawn") and n < 64 then
+            local go = e.ctx:call("get_GameObject")
+            if go then
+                local p = go:call("get_Transform"):call("get_Position")
+                t[#t + 1] = string.pack("<s1fffB", id, p.x, p.y, p.z, e.ctx:call("get_IsDead") and 1 or 0)
+                n = n + 1
+            end
+        end
+    end
+    send_ctrl(string.pack("<Bs1B", MSG_ENEMY_PRESENCE, me.chapter, n) .. table.concat(t), foes.peer_id)
 end
 
--- guest ------------------------------------------------------------------------------------------
+-- arbiter ----------------------------------------------------------------------------------------
+
+local function send_owners(changes)
+    if #changes == 0 then return end
+    local t = { string.pack("<BH", MSG_ENEMY_OWNERS, #changes) }
+    for _, c in ipairs(changes) do t[#t + 1] = string.pack("<s1B", c[1], c[2] and 1 or 0) end
+    send_ctrl(table.concat(t), foes.peer_id)
+end
+
+-- Who should run an enemy (true = the arbiter, false = the other player). cur: current owner or nil.
+-- Pure, so tools/test_owner_decision.lua can check it outside the game.
+local function owner_decision(cur, together, dead, dme, dpeer)
+    if not together then return true end
+    if dead then
+        if cur == nil then return true end
+        return cur
+    end
+    if cur == nil then return dme <= dpeer end
+    if cur and dpeer + OWNER_HYSTERESIS < dme then return false end
+    if not cur and dme + OWNER_HYSTERESIS < dpeer then return true end
+    return cur
+end
+
+-- Every spawned enemy (ours, or reported by the guest) goes to whoever is nearer.
+local function arbitrate(t_now)
+    if t_now < foes.next_arbitrate then return end
+    foes.next_arbitrate = t_now + 0.5
+    local ppos, p = peer_position()
+    local my = me.go:call("get_Transform"):call("get_Position")
+    local together = p ~= nil and p.chapter == me.chapter and ppos ~= nil
+    local changes = {}
+    local seen = {}
+    local function decide(id, pos, dead)
+        seen[id] = true
+        local cur = foes.owner[id]
+        local want = owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0)
+        if want ~= cur then
+            set_owner(id, want)
+            changes[#changes + 1] = { id, not want } -- sent from the guest's point of view
+        end
+    end
+    for id, e in pairs(foes.index) do
+        if e.ctx:call("get_IsSpawn") then
+            local go = e.ctx:call("get_GameObject")
+            if go then decide(id, go:call("get_Transform"):call("get_Position"), e.ctx:call("get_IsDead")) end
+        end
+    end
+    for id, pr in pairs(foes.presence) do
+        if not seen[id] and t_now - pr.t < 1.5 then decide(id, pr.pos, pr.dead) end
+    end
+    -- a full list now and then, in case something was missed
+    if t_now >= foes.next_full_owners then
+        foes.next_full_owners = t_now + 5
+        changes = {}
+        for id, mine in pairs(foes.owner) do changes[#changes + 1] = { id, not mine } end
+    end
+    send_owners(changes)
+end
+
+-- receiving --------------------------------------------------------------------------------------
 
 local function read_enemy(data)
     local s = {}
@@ -992,18 +1182,16 @@ local function read_enemy(data)
 end
 
 enemy_recv = function(from, data, t_now)
-    local st_net = session.status
-    if foes.role == "test" then
-        if from ~= LOOPBACK_ID then return end
-    elseif foes.role ~= "guest" or st_net == nil or from ~= st_net.owner then
-        return
-    end
+    if not foes.active or from ~= foes.peer_id then return end
     local ok, s = pcall(read_enemy, data)
     if not ok then return end
-    if foes.role == "test" then
+    if foes.test then
         if s.id ~= foes.test.src then return end
         s.id = foes.test.dst
+    elseif foes.owner[s.id] == true then
+        return -- ours (a handover is in flight); the arbiter's word stands
     end
+    if foes.owner[s.id] == nil then foes.owner[s.id] = false end
     local st = foes.states[s.id]
     if st == nil then
         st = { snaps = {}, last = 0 }
@@ -1017,7 +1205,7 @@ enemy_recv = function(from, data, t_now)
 end
 
 enemy_ctrl = function(from, kind, data)
-    local st_net = session.status
+    if not foes.active or from ~= foes.peer_id then return end
     if kind == MSG_ENEMY_SKEL then
         local _, k, n, pos = string.unpack("<Bs1B", data)
         local names = {}
@@ -1027,21 +1215,44 @@ enemy_ctrl = function(from, kind, data)
             if pup.kind == k then pup.jmap = nil end
         end
     elseif kind == MSG_REQ_ENEMY_SKEL then
-        if foes.role ~= "host" then return end
         local _, k = string.unpack("<Bs1", data)
         for _, j in pairs(foes.joints) do
             if j.kind == k then return send_skeleton(k, j.names, from) end
         end
         foes.skel_sent[k] = nil -- sent with the next pose of that kind
     elseif kind == MSG_ENEMY_DAMAGE then
-        if (foes.role == "host" and st_net and st_net.state == "in_lobby") or foes.role == "test" then host_apply_damage(data) end
+        local _, id, which, dmg, b1, b2 = string.unpack("<Bs1Bi4BB", data)
+        if foes.test and id == foes.test.dst then id = foes.test.src end
+        local e = foes.index[id]
+        if e and foes.owner[id] ~= false and e.ctx:call("get_IsSpawn") then
+            apply_damage(e, which, dmg, b1 == 1, b2 == 1)
+            foes.stats.dmg_applied = foes.stats.dmg_applied + 1
+        end
+    elseif kind == MSG_ENEMY_OWNERS then
+        if foes.arbiter or foes.test then return end
+        local _, n, pos = string.unpack("<BH", data)
+        for _ = 1, n do
+            local id, guest
+            id, guest, pos = string.unpack("<s1B", data, pos)
+            set_owner(id, guest == 1)
+        end
+    elseif kind == MSG_ENEMY_PRESENCE then
+        if not foes.arbiter then return end
+        local _, chapter, n, pos = string.unpack("<Bs1B", data)
+        if chapter ~= me.chapter then foes.presence = {} return end
+        local t = now()
+        for _ = 1, n do
+            local id, x, y, z, dead
+            id, x, y, z, dead, pos = string.unpack("<s1fffB", data, pos)
+            foes.presence[id] = { pos = Vector3f.new(x, y, z), dead = dead == 1, t = t }
+        end
     end
 end
 
--- Damage the guest deals to a puppet goes to the host instead.
+-- Damage dealt to a puppet goes to its owner instead.
 local function forward_damage(which)
     return function(args)
-        if foes.bypass or (foes.role ~= "guest" and foes.role ~= "test") then return end
+        if foes.bypass or not foes.active then return end
         local id = foes.hp_owner[sdk.to_int64(args[2])]
         if id == nil then return end
         if #foes.dmg_out < 64 then
@@ -1054,10 +1265,10 @@ end
 sdk.hook(M_ADD_HP, forward_damage(0), nil)
 sdk.hook(M_ADD_RHP, forward_damage(1), nil)
 
--- The guest's own spawn logic puts enemies away by its rules (e.g. a wave spawner every ~10 s, or the
--- guest being far from the spawn area). While the host still has the enemy, refuse.
+-- Our own spawn logic puts enemies away by its rules (e.g. a wave spawner every ~10 s, or us being far
+-- from the spawn area). While the owner still has the enemy, refuse.
 local function guard_suspend(args)
-    if foes.self_call or (foes.role ~= "guest" and foes.role ~= "test") then return end
+    if foes.self_call or not foes.active then return end
     local id = foes.ctl_owner[sdk.to_int64(args[2])]
     local st = id and foes.states[id]
     if st and st.flags & F_SPAWNED ~= 0 and now() - st.last < 1.0 then
@@ -1079,22 +1290,21 @@ local function sample(snaps, rt)
     return a, b, f
 end
 
-local function host_render_time(t_now)
-    local st_net = session.status
-    local hp = foes.role == "test" and peers[LOOPBACK_ID] or (st_net and peers[st_net.owner])
-    if hp == nil or hp.off == nil then return nil end
-    return t_now - hp.off - cfg.interp_delay
+local function peer_render_time(t_now)
+    local p = foes.peer_id and peers[foes.peer_id]
+    if p == nil or p.off == nil then return nil end
+    return t_now - p.off - cfg.interp_delay
 end
 
--- Before animation: spawn / put away / keep awake / warp.
-local function guest_tick(t_now)
+-- Before animation: spawn / put away / puppetize / keep awake / warp the enemies they own.
+local function enemies_tick(t_now)
     refresh_index(t_now)
     local cm = character_manager()
-    local rt = host_render_time(t_now)
+    local rt = peer_render_time(t_now)
     for id, st in pairs(foes.states) do
         local e = foes.index[id]
         local fresh = t_now - st.last < 1.0 and st.chapter == me.chapter
-        if e then
+        if e and foes.owner[id] == false then
             local pup = foes.puppets[id]
             local spawned = e.ctx:call("get_IsSpawn")
             if pup and not spawned then -- put to sleep anyway: let go, it gets respawned below
@@ -1102,7 +1312,7 @@ local function guest_tick(t_now)
                 pup = nil
             end
             if fresh and st.flags & F_SPAWNED ~= 0 then
-                if not spawned and pup == nil and t_now >= (st.next_spawn or 0) then
+                if not spawned and t_now >= (st.next_spawn or 0) then
                     -- a never-spawned enemy needs requestSpawn, one that was put away needs requestResume
                     st.next_spawn = t_now + 1.5
                     st.tries = (st.tries or 0) + 1
@@ -1117,25 +1327,31 @@ local function guest_tick(t_now)
         end
         if t_now - st.last > 10 then foes.states[id] = nil end
     end
-    -- every enemy alive here becomes a puppet; the ones the host doesn't have are put away
+    -- what's alive here: ours keep their AI; theirs become puppets (put away if they don't send it)
     for id, e in pairs(foes.index) do
-        if (foes.test == nil or id == foes.test.dst) and e.ctx:call("get_IsSpawn") then
-            if foes.puppets[id] == nil then puppetize(id, e) end
-            local st = foes.states[id]
-            if st == nil or t_now - st.last > 1.5 then
-                e.orphan_since = e.orphan_since or t_now
-                if t_now - e.orphan_since > 1.5 then
-                    local ctl = spawn_control(e)
-                    if ctl then ctl_request(ctl, "requestSuspend") end
-                    release_puppet(id, false)
-                    e.orphan_since = t_now + 3
+        local considered = foes.test == nil or id == foes.test.dst
+        if considered and e.ctx:call("get_IsSpawn") then
+            if foes.owner[id] == nil and foes.test == nil then foes.owner[id] = true end
+            if foes.owner[id] == false then
+                if foes.puppets[id] == nil then puppetize(id, e) end
+                local st = foes.states[id]
+                if st == nil or t_now - st.last > 3 then
+                    e.orphan_since = e.orphan_since or t_now
+                    if t_now - e.orphan_since > 3 then
+                        local ctl = spawn_control(e)
+                        if ctl then ctl_request(ctl, "requestSuspend") end
+                        release_puppet(id, false)
+                        e.orphan_since = t_now + 3
+                    end
+                else
+                    e.orphan_since = nil
                 end
-            else
-                e.orphan_since = nil
             end
         end
     end
+    local count = 0
     for id, pup in pairs(foes.puppets) do
+        count = count + 1
         local st = foes.states[id]
         local has = st ~= nil and #st.snaps > 0 and t_now - st.last < 1.0
         local go = pup.go
@@ -1148,6 +1364,7 @@ local function guest_tick(t_now)
             pcall(cm.call, cm, WARP_SIG, pup.e.ctx:call("get_ID"), nullable_vec3(pos), nullable_quat(a.rot:slerp(b.rot, f)))
         end
     end
+    foes.stats.puppets = count
 end
 
 local function build_jmap(pup)
@@ -1156,7 +1373,7 @@ local function build_jmap(pup)
         local t = now()
         if t - (foes.asked[pup.kind] or 0) > 2 then
             foes.asked[pup.kind] = t
-            send_ctrl(string.pack("<Bs1", MSG_REQ_ENEMY_SKEL, pup.kind), session.status and session.status.owner)
+            send_ctrl(string.pack("<Bs1", MSG_REQ_ENEMY_SKEL, pup.kind), foes.peer_id)
         end
         return
     end
@@ -1168,9 +1385,9 @@ local function build_jmap(pup)
     pup.j_hip = by["Hip"]
 end
 
--- After animation: the host's skeleton over the enemy's own (stepped at the host's send rate).
-local function guest_pose(t_now)
-    local rt = host_render_time(t_now)
+-- After animation: the owner's skeleton over the puppet's own (stepped at the owner's send rate).
+local function puppets_pose(t_now)
+    local rt = peer_render_time(t_now)
     for id, pup in pairs(foes.puppets) do
         local st = foes.states[id]
         if st and #st.snaps > 0 and t_now - st.last < 1.0 then
@@ -1189,48 +1406,49 @@ local function guest_pose(t_now)
     end
 end
 
-local function enemies_role(st_net)
-    local role = "off"
+local function enemies_session(st_net)
+    local active, arbiter, peer_id = false, false, nil
     if cfg.enemy_sync and st_net and st_net.state == "in_lobby" and session.last_members ~= "" then
-        role = st_net.is_host and "host" or "guest"
+        for _, m in ipairs(st_net.members or {}) do
+            if m.id ~= st_net.me then peer_id = m.id break end
+        end
+        active, arbiter = peer_id ~= nil, st_net.is_host
     elseif foes.test and loopback then
-        role = "test"
+        active, arbiter, peer_id = true, false, LOOPBACK_ID
     end
-    if role ~= foes.role then
-        if foes.role == "guest" or foes.role == "test" then enemies_reset(me.go ~= nil) end
-        foes.role = role
-        say("shared enemies: %s", role)
+    if active ~= foes.active or peer_id ~= foes.peer_id then
+        if foes.active then enemies_reset(me.go ~= nil) end
+        foes.active, foes.peer_id = active, peer_id
+        say("shared enemies: %s", active and (foes.test and "test" or (arbiter and "on (you decide who runs each enemy)" or "on")) or "off")
     end
-end
-
-local function the_guest()
-    for id, p in pairs(peers) do
-        if id ~= LOOPBACK_ID then return p end
+    foes.arbiter = arbiter
+    if foes.test then
+        foes.owner[foes.test.src], foes.owner[foes.test.dst] = true, false
     end
 end
 
 -- called before animation
 local function enemies_update(t_now)
-    enemies_role(session.status)
-    if (foes.role == "guest" or foes.role == "test") and me.go then guest_tick(t_now) end
+    enemies_session(session.status)
+    if foes.active and me.go then enemies_tick(t_now) end
 end
 
 -- called after animation
 local function enemies_late(t_now)
-    if me.go == nil then return end
-    if foes.role == "host" then
-        local g = the_guest()
-        if g and g.chapter == me.chapter then host_send(t_now, g) end
-    elseif foes.role == "guest" or foes.role == "test" then
-        if foes.role == "test" then host_send(t_now, peer(LOOPBACK_ID)) end
-        guest_pose(t_now)
-        if #foes.dmg_out > 0 then
-            local out = foes.dmg_out
-            foes.dmg_out = {}
-            local to = foes.role == "test" and LOOPBACK_ID or session.status.owner
-            for _, blob in ipairs(out) do send_ctrl(blob, to) end
-            foes.stats.dmg_sent = foes.stats.dmg_sent + #out
-        end
+    if not foes.active or me.go == nil then return end
+    local p = peers[foes.peer_id]
+    local together = foes.test ~= nil or (p ~= nil and p.chapter == me.chapter)
+    if foes.arbiter and not foes.test then arbitrate(t_now) end
+    if together then
+        send_owned(t_now)
+        if not foes.arbiter and not foes.test then send_presence(t_now) end
+    end
+    puppets_pose(t_now)
+    if #foes.dmg_out > 0 then
+        local out = foes.dmg_out
+        foes.dmg_out = {}
+        for _, blob in ipairs(out) do send_ctrl(blob, foes.peer_id) end
+        foes.stats.dmg_sent = foes.stats.dmg_sent + #out
     end
 end
 
@@ -1454,13 +1672,9 @@ re.on_draw_ui(function()
             p.rtt and string.format("%d ms", math.floor(p.rtt * 1000)) or "-"))
     end
     imgui.text(string.format("net: out %.1f kbit/s, in %.1f kbit/s", stats.tx_kbps, stats.rx_kbps))
-    if foes.role == "host" then
-        imgui.text(string.format("Shared enemies: you are the host, %d enemies shared, %d hits from your partner",
-            foes.stats.synced, foes.stats.dmg_applied))
-    elseif foes.role == "guest" then
-        local n = 0
-        for _ in pairs(foes.puppets) do n = n + 1 end
-        imgui.text(string.format("Shared enemies: following the host, %d enemies here, %d hits sent", n, foes.stats.dmg_sent))
+    if foes.active then
+        imgui.text(string.format("Shared enemies: you run %d, your partner runs %d. Hits sent %d, received %d. Handovers %d.",
+            foes.stats.owned, foes.stats.puppets, foes.stats.dmg_sent, foes.stats.dmg_applied, foes.stats.handovers))
     end
 
     imgui.separator()
@@ -1469,7 +1683,7 @@ re.on_draw_ui(function()
     local changed = false
     c, v = imgui.checkbox("Self test: echo faces you", cfg.loopback_face); if c then cfg.loopback_face, changed = v, true end
     c, v = imgui.checkbox("Partner's muzzle flash and gun sounds", cfg.shot_fx); if c then cfg.shot_fx, changed = v, true end
-    c, v = imgui.checkbox("Share the host's enemies (both players need it on)", cfg.enemy_sync); if c then cfg.enemy_sync, changed = v, true end
+    c, v = imgui.checkbox("Share enemies (both players need it on)", cfg.enemy_sync); if c then cfg.enemy_sync, changed = v, true end
     c, v = imgui.checkbox("Name tags", cfg.nametags); if c then cfg.nametags, changed = v, true end
     c, v = imgui.slider_int("Pose updates per second", cfg.send_hz, 5, 30); if c then cfg.send_hz, changed = v, true end
     c, v = imgui.slider_float("Smoothing delay (s)", cfg.interp_delay, 0.05, 0.4); if c then cfg.interp_delay, changed = v, true end
