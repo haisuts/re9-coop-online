@@ -160,6 +160,29 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
 - Shaders recompile on every launch until the game exits cleanly once (shader.cache2 still from March):
   kill = no save. Quit from the game menu.
 
+
+## v0.3.0 status (2026-10-13 21:30) — verified on one PC with the built-in test mode
+
+- v0.2 shots: muzzle hook (`EPVExpertMuzzleFlashCustom.play` on our gun) -> MSG_SHOT -> puppet point
+  light on R_Wep for 60 ms (light object created on the echo after a real shot). Gun sounds: hook
+  `SoundContainer.trigger(u32, GO a, ...)` where a == our gun -> MSG_SOUND(id) -> partner side plays
+  `SoundContainer.trigger(u32, vec3, GO, u32, CallbackType, 4x Action)` on its own gun's container at
+  the puppet's R_Wep. Audio capture proved the positional call plays (-54 dB -> -14 dB, 1.5 s tail).
+- v0.3 shared enemies, test mode (`dev/test_enemy_echo.lua`: enemy A's stream goes through the
+  loopback and drives enemy B as the guest copy): B copied A walking at Grace with arms out; with A
+  calm, a revolver shot at B was caught (B HP stayed 580), sent as 2 damage messages, applied to A
+  (580 -> 0, dead), and B then collapsed copying A's death. Screens: scratchpad t1, t7-t10.
+- Gotchas found during the test:
+  - A wave spawner (`cp_B000SpawnParam_隔離病棟最後WAVE_B00`) calls `requestSuspend()` ->
+    `executeSuspend()` -> `invalidateSpawn()` on its enemy about every 10 s on the guest. The mod
+    now refuses `CharacterSpawnParamBase.requestSuspend()` / `(ContextID)` for puppets the host still
+    reports (its own calls pass via `foes.self_call`).
+  - A put-away enemy comes back with `requestResume()`, not `requestSpawn()` (which is a no-op once
+    HasCompletedSpawn is true). The mod alternates the two.
+  - Warping an enemy into wall geometry makes it sink through the floor (CharacterController pushes it
+    out downwards). Real host positions are valid, so only the test offset was affected.
+- Two-PC test still to do (user has one PC).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
