@@ -183,6 +183,22 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
     out downwards). Real host positions are valid, so only the test offset was affected.
 - Two-PC test still to do (user has one PC).
 
+
+## v0.4 WIP status (2026-10-13 21:45)
+
+- Enemy ownership model (nearer player runs the enemy, lobby owner arbitrates, presence reports,
+  handover keeps HP) implemented; test-mode regression passed (hit on copy B killed original A).
+  Owner rule: 11/11 offline cases (`tools/luacheck/luacheck.exe --run tools/test_owner_decision.lua`).
+  Two-PC behaviour (arbitrate/presence/handover) untested.
+- **Lights created with `createComponent(via.render.SpotLight/PointLight)` don't work**: their float
+  setters (Intensity/Cone/Spread/Radius) read back 0.0, while the same plain `call('set_Cone', 31.0)`
+  works on the game's own flashlight light. So the v0.2 muzzle-flash light and the v0.4 partner
+  flashlight are invisible. `sdk.float_to_ptr` is WRONG here (wrote 0.0). Next: instantiate the
+  game's pool prefab `appsystem/character/characterprefab/playercommon/prefab/playerflashlightpoolobject.pfb`
+  (has a configured SpotLight + PointLight) for puppets instead.
+- Grace's flashlight can't be switched on in Chap3_02 (`FlashLightBlackboardUnit.Core:
+  set_SwitchLightRequestImmediately(Nullable<bool>)` ignored, `_IsLighting` reset each frame).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
