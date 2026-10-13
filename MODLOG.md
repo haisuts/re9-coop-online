@@ -89,7 +89,21 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
 - REFramework menu: Insert. ScriptRunner header (150, 492); "Reset scripts" (178, 518) — avoid.
 - Dev bridge: `python tools/bridge.py "<lua>"` (runs on UpdateBehavior, globals in `dev`).
 
+## v0.1.0 status (2026-10-13 20:50) — verified on one PC
+
+- Steam: real friends-only lobby created under app 3764200; loopback send/recv OK. Two-PC P2P NOT
+  verified yet (user has one PC).
+- Self test ("echo" via the plugin's loopback, 150 ms delay): puppet built from the local costume
+  (8 parts + ch02.refskel), follows walking/strafing with leg animation, gun mesh on R_Wep, name tag
+  above `Head_0`. Screenshots: scratchpad e5/e6/e7.
+- Package: `dist/RE9_Coop_Online_v0.1.0.zip` (autorun lua + plugin dll + README). `um publish check`
+  "game file copied verbatim" failures are false positives: our own installed mod files.
+- Shaders recompile on every launch until the game exits cleanly once (shader.cache2 still from March):
+  kill = no save. Quit from the game menu.
+
 ## Next steps
-- [ ] Confirm REFramework build works on the current game version (or update to nightly).
-- [ ] Live recon in game: player manager singleton, player GameObject, prefab path, motion/anim.
-- [ ] Vertical slice: local loopback puppet (own pose echoed back with an offset).
+- [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
+- [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
+- [ ] v0.3: host-authoritative enemies (`CharacterManager:get_EnemyContextList()`), client damage
+      forwarded to host.
+- [ ] v0.4: doors / pickups / chapter flow follow the host.
