@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.6.0
+# RE9 Co-op (online) — v0.6.1
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -16,8 +16,10 @@ from it is used.
 - **Story steps (experimental)**: every level-flow step either of you takes is taken by the other
   game too; a joining guest gets the host's chapter progress.
 - **Chapters**: when the host moves on, the guest's game follows 5 s later (countdown on screen).
-- **Locks, puzzles, switches**: their state goes to the partner and takes effect when that area loads
-  in the partner's game.
+- **Locks, keys, puzzles, switches — live**: a lock one player opens (with a key or otherwise) opens
+  in the partner's game too, right away, without any scene for the partner's character; items placed
+  into puzzle slots count for both; switch positions and other gimmick states follow as soon as the
+  partner is near them. Gimmicks in areas the partner hasn't loaded take the state when they load.
 - **Cutscenes**: the partner is hidden while either of you is in one.
 - **One item box for both**: what one player puts in the item box, the other finds in theirs and can
   take out (guns keep their loaded ammo).
@@ -27,9 +29,7 @@ from it is used.
   chapter.
 - **Teleport to partner**, partner health in the name tag, public lobbies and a "Copy lobby ID" button.
 
-**Not shared:** what you carry (each keeps their own inventory, saved in their own save). A key used or
-a lever pulled by one player shows up for the other only after that area reloads (running gimmicks
-follow their own state).
+**Not shared:** what you carry (each keeps their own inventory, saved in their own save).
 
 ---
 
@@ -46,8 +46,10 @@ follow their own state).
   повторяются у другого; при подключении гость получает весь прогресс главы хоста.
 - **Главы:** если хост ушёл в другую главу, гость через 5 секунд переходит туда же (с отсчётом на
   экране); есть и кнопка «Go to partner's chapter».
-- **Замки, загадки, переключатели:** их состояние передаётся напарнику и применяется, когда этот
-  участок у него загрузится (см. ограничения).
+- **Замки, ключи, загадки, переключатели — сразу:** замок, открытый одним (ключом или иначе),
+  тут же открывается и у другого — без сцены с его персонажем; предметы, вставленные в загадку,
+  засчитываются обоим; положения переключателей и другие состояния подтягиваются, когда напарник
+  рядом с ними. То, что у напарника ещё не загружено, применится при загрузке участка.
 - **Катсцены:** пока у кого-то из вас катсцена, напарник скрыт и не мешает.
 - **Убитые враги:** враг, убитый одним игроком, мёртв и в игре второго (не «живой труп»).
 - **Общий ящик предметов:** положили вещь в ящик — она появляется в ящике у напарника, и он может её
@@ -137,13 +139,19 @@ follow their own state).
   `addPanel` + `reloadDirect` / `removePanel`. Inventories are changed only inside the game's GUI update
   (where the game's own item box moves items); changing them from REFramework's frame callbacks
   crashed the game on a worker thread. On joining, the boxes are merged (nothing is lost).
+- Live gimmicks: the partner's gimmick fields are written straight into the context's live
+  `StructureData` objects (`StructureDataContainer._Structures`), the ones the running gimmick reads;
+  `GimmickContext.restore()` swaps in copies the running gimmick never sees. Locks: the interact
+  triggers a `GmLockV2` unlocks on (`_UnlockParams._TriggerName`: "UseKeyItem_Success", "TurnOff" sent
+  at the end of the key scene, ...) and the key-item success triggers are caught in
+  `InteractTrigger.onProcessEvent` and fired on the partner's copy of the gimmick (by context ID).
 - Saves: the host's save is noticed by `SaveServiceManager`'s serial number moving to a game slot; the
   guest then runs `GuiManager.AutoSaveFlow.requestAutoSave` with the game's default settings (Auto
   slot, empty or oldest).
 
 ## Roadmap
-1. Live sharing of key items, levers and puzzles that are running. A lock (`GmLockV2`) knows it is
-   unlocked once its data says so, but only the game's key-use scene switches its running state.
+1. Puzzles whose result only shows in the solving player's own scene may need that area reloaded for
+   the partner.
 2. Leon as the partner in Grace's chapters (and the reverse), downed/revive.
 
 ## Known limitations
@@ -153,7 +161,8 @@ follow their own state).
   game's own autosaves do.
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Items dropped at runtime (e.g. by enemies) aren't shared.
-- A key, lever or puzzle used by one player takes effect for the other only once that area reloads.
+- A gimmick that reacts only to the solving player's own scene (not to a lock trigger or its data)
+  catches up for the partner when that area reloads.
 - Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
   the first through the network code). The first real two-PC session may still find problems — please

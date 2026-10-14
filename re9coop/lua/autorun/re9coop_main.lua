@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.6.0"
+local VERSION = "0.6.1"
 local PROTO = 5
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -297,6 +297,7 @@ local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG_BOX, MSG_SAVE = 22, 23
+local MSG_GIMMICK_TRIGGER = 24
 local FLAG_CUTSCENE = 64
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
@@ -805,7 +806,7 @@ local function on_ctrl(from, data)
         enemy_ctrl(from, kind, data)
     elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN) and world_ctrl then
         world_ctrl(from, kind, data)
-    elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS) and gimmick_ctrl then
+    elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS or kind == MSG_GIMMICK_TRIGGER) and gimmick_ctrl then
         gimmick_ctrl(from, kind, data)
     elseif kind == MSG_STORY and story_ctrl then
         story_ctrl(from, kind, data)
@@ -1603,6 +1604,8 @@ local function refresh_world(t_now)
     world.doors, world.door_ids, world.items, world.item_ids = doors, door_ids, items, item_ids
 end
 
+world.scene_components = scene_components
+
 world_shared = function()
     if me.go == nil or not cfg.world_sync then return false end
     if _G.re9coop_test_shared then return true end -- dev bridge only
@@ -1711,12 +1714,19 @@ end
 -- objects; app.structure.GmBaseData has the common progress fields (_IsLock, _IsDone,
 -- _IsInteracted, _IsOperable, _ProgressIndex...). We scan the contexts a slice per frame and
 -- fingerprint their logical fields (bools and integers; positions, rates and map-icon data are left
--- out). A change is sent to the partner, whose game stores the context, writes the fields in and
--- restores it: the path the game uses to load a save. A gimmick that isn't loaded there picks the
--- state up when its area loads (a lock already open, a puzzle already solved). One that is running
--- right now keeps following its own runtime state (the game rewrites the data from it), so live
--- actions are shared per kind instead (door pushes above). On joining, the lobby owner sends every
--- gimmick's state once. The gimmick global bit flags are OR-ed.
+-- out). A change is sent to the partner, whose game writes the fields straight into that context's
+-- live StructureData objects (the very objects the running gimmick reads: a switch moves to the new
+-- position, a lock's data opens). store()/restore() would swap in copies the running gimmick never
+-- sees. A gimmick that isn't loaded there picks the state up when its area loads. Doors are left to
+-- the door pushes above.
+-- Locks opened, keys and items used: the interact triggers a lock (GmLockV2) unlocks on (its
+-- _UnlockParams: "UseKeyItem_Success", or "TurnOff" sent at the end of the key scene...) and the
+-- KeyItemInventory success triggers ("UseKeyItem_Success...", "UseKeyItem_Use...") are fired on the
+-- partner's copy of that gimmick too (InteractTrigger.onProcessEvent): the gimmick runs its own
+-- reaction (the lock opens, the slot takes the item) with no player action there. Player input
+-- triggers ("Interact"...) are never replayed.
+-- All of this is applied inside the game's GUI update (see the item box section). On joining, the
+-- lobby owner sends every gimmick's state once. The gimmick global bit flags are OR-ed.
 local gim, gimmicks_late
 do
 local GIMMICK_SKIP_TYPES = {
@@ -1738,7 +1748,11 @@ gim = {
     flags_sent = { -1, -1 },
     out = {},
     applying = false,
-    stats = { sent = 0, applied = 0 },
+    queue = {},           -- the partner's messages, applied in the GUI update
+    triggers = { by_addr = {}, by_key = {}, t = 0, chapter = "", forced = 0 },
+    trigger_applying = false,
+    trig_sent = {},       -- "context id|trigger" -> when we sent it
+    stats = { sent = 0, applied = 0, live_sent = 0, live_applied = 0 },
 }
 
 local function gimmick_manager()
@@ -1861,31 +1875,140 @@ local function apply_gimmick(data)
     end
     gimmick_contexts(now())
     local gc = gim.by_id[id]
-    if gc == nil then return end
-    local save = gc:call("store")
-    local arr = save and save:get_field("_StructureDatas")
+    if gc == nil or (world.doors[id] and not full) then return end
+    local sdc = gc:call("get_SDC")
+    local list = sdc and sdc:get_field("_Structures")
+    local count = list and list:call("get_Count") or 0
     local changed = false
-    for _, x in ipairs(arr and arr:get_elements() or {}) do
-        local w = want[x:get_type_definition():get_full_name()]
+    gim.applying = true
+    for i = 0, count - 1 do
+        local x = list:call("get_Item", i)
+        local w = x and want[x:get_type_definition():get_full_name()]
         if w then
+            local dirty = false
             for fname, v in pairs(w) do
                 local ok, cur = pcall(x.get_field, x, fname)
                 if ok and cur ~= v then
                     x:set_field(fname, v)
-                    changed = true
+                    dirty = true
                 end
+            end
+            if dirty then
+                pcall(x.call, x, "onDirty")
+                changed = true
             end
         end
     end
+    gim.applying = false
     if changed then
-        gim.applying = true
-        pcall(gc.call, gc, "restore", save)
-        gim.applying = false
         gim.applied_at[id] = now()
         gim.stats.applied = gim.stats.applied + 1
     end
     local ok, _, sig = pcall(gimmick_state, gc)
     if ok then gim.sig[id] = sig end -- what we now have is not a change of ours
+end
+
+-- key-item triggers worth replaying: the outcome of using an item, never player input
+local function key_outcome(name)
+    return type(name) == "string" and (name:find("^UseKeyItem_Success") or name:find("^UseKeyItem_Use")) ~= nil
+end
+
+local TYPE_KEY_HOLDER = sdk.typeof("app.InteractTriggerKeyItemInventoryHolder")
+local TYPE_LOCK = sdk.typeof("app.GmLockV2")
+local TYPE_CORE = sdk.typeof("app.GimmickCore")
+local M_TRIGGER_PROCESS = sdk.find_type_definition("app.InteractTrigger"):get_method("onProcessEvent(via.GameObject)")
+local SIG_TRIGGER_PROCESS = "onProcessEvent(via.GameObject)"
+
+-- the replayable triggers here, by address and by "context id|name"
+local function trigger_index(t_now, force)
+    local ti = gim.triggers
+    if force then
+        if t_now < ti.forced then return ti end -- not more than once in 2 s
+        ti.forced = t_now + 2
+    elseif ti.chapter == me.chapter and t_now < ti.t then
+        return ti
+    end
+    ti.t, ti.chapter, ti.by_addr, ti.by_key = t_now + 30, me.chapter, {}, {}
+    -- the triggers on `go` (every holder on it) whose names pass `want`
+    local function add(go, want)
+        local core = go and go:call("getComponent(System.Type)", TYPE_CORE)
+        local ok, id = pcall(function() return core:call("get_ContextID"):call("ToString") end)
+        if not ok or not id then return end
+        local lock = go:call("getComponent(System.Type)", TYPE_LOCK)
+        for _, c in ipairs(go:call("get_Components"):get_elements()) do
+            local okt, trs = pcall(function() return c:get_field("_Triggers"):get_elements() end)
+            for _, t in ipairs(okt and trs or {}) do
+                local name = t:get_field("_Name")
+                if want(name) then
+                    ti.by_addr[t:get_address()] = { id = id, name = name }
+                    ti.by_key[id .. "|" .. name] = { trig = t, go = go, lock = lock }
+                end
+            end
+        end
+    end
+    for _, h in ipairs(world.scene_components(TYPE_KEY_HOLDER)) do add(h:call("get_GameObject"), key_outcome) end
+    for _, lock in ipairs(world.scene_components(TYPE_LOCK)) do
+        local names = {}
+        local okp, params = pcall(function() return lock:get_field("_UnlockParams"):get_elements() end)
+        for _, prm in ipairs(okp and params or {}) do
+            local n = prm:get_field("_TriggerName")
+            if n and n ~= "" and n ~= "Interact" then names[n] = true end
+        end
+        if next(names) then add(lock:call("get_GameObject"), function(n) return names[n] == true end) end
+    end
+    return ti
+end
+
+local function replayable(name)
+    return key_outcome(name) or name == "TurnOff" or name == "Unlock"
+end
+
+sdk.hook(M_TRIGGER_PROCESS, function(args)
+    if gim.trigger_applying or not cfg.gimmick_sync or not world_shared() then return end
+    local addr = sdk.to_int64(args[2])
+    local t_now = now()
+    local e = trigger_index(t_now).by_addr[addr]
+    if e == nil then
+        -- not indexed: rebuild only for names that look like an outcome
+        local t = sdk.to_managed_object(args[2])
+        local ok, name = pcall(function() return t:get_field("_Name") end)
+        if not ok or not replayable(name) then return end
+        e = trigger_index(t_now, true).by_addr[addr]
+    end
+    if e == nil then return end
+    -- our game's own reaction to a replay (its chain fires more triggers) isn't news; one send per
+    -- trigger is enough
+    local key = e.id .. "|" .. e.name
+    if t_now - (gim.applied_at[e.id] or -10) < 5 or t_now - (gim.trig_sent[key] or -10) < 10 then return end
+    gim.trig_sent[key] = t_now
+    if #gim.out < 64 then
+        gim.out[#gim.out + 1] = string.pack("<Bs1s1s1", MSG_GIMMICK_TRIGGER, me.chapter, e.id, e.name)
+        gim.stats.live_sent = gim.stats.live_sent + 1
+    end
+end, nil)
+
+-- a lock that is open already (its data says so) isn't opened again
+local function lock_open(lock)
+    local ok, open = pcall(function()
+        local d = lock:get_field("_GmLockData")
+        return d:get_field("_UnlockCount") >= d:get_field("_MaxUnlockCount") and lock:get_field("_GmBaseData"):get_field("_IsDone")
+    end)
+    return ok and open == true
+end
+
+local function apply_trigger(data)
+    local _, chapter, id, name = string.unpack("<Bs1s1s1", data)
+    if chapter ~= me.chapter then return end
+    local key = id .. "|" .. name
+    local t_now = now()
+    local e = trigger_index(t_now).by_key[key] or trigger_index(t_now, true).by_key[key]
+    if e == nil then return "missing" end -- not indexed (yet), or not loaded here
+    if e.lock and lock_open(e.lock) then return end
+    gim.trigger_applying = true
+    pcall(e.trig.call, e.trig, SIG_TRIGGER_PROCESS, e.go)
+    gim.trigger_applying = false
+    gim.applied_at[id] = now()
+    gim.stats.live_applied = gim.stats.live_applied + 1
 end
 
 -- the lobby owner sends every gimmick once when a partner shows up in the same chapter
@@ -1932,16 +2055,41 @@ local function apply_gimmick_flags(data)
 end
 
 gimmick_ctrl = function(from, kind, data)
-    if not world_shared() then return end
-    if kind == MSG_GIMMICK then
-        pcall(apply_gimmick, data)
-    elseif kind == MSG_GIMMICK_FLAGS then
-        pcall(apply_gimmick_flags, data)
+    if not world_shared() or not cfg.gimmick_sync or #gim.queue >= 2048 then return end
+    gim.queue[#gim.queue + 1] = { kind = kind, data = data }
+end
+
+-- the partner's gimmick messages, applied inside the game's GUI update
+gim.gui_tick = function()
+    if #gim.queue == 0 or not world_shared() then return end
+    local queue = gim.queue
+    gim.queue = {}
+    for i, m in ipairs(queue) do
+        if i > 40 then -- the rest next frame (a full sync is ~500 messages)
+            for j = i, #queue do gim.queue[#gim.queue + 1] = queue[j] end
+            break
+        end
+        local ok, err
+        if m.kind == MSG_GIMMICK then
+            ok, err = pcall(apply_gimmick, m.data)
+        elseif m.kind == MSG_GIMMICK_FLAGS then
+            ok, err = pcall(apply_gimmick_flags, m.data)
+        elseif m.kind == MSG_GIMMICK_TRIGGER then
+            ok, err = pcall(apply_trigger, m.data)
+            -- the gimmick may not be indexed yet: try again for 10 s (if it isn't loaded here at all,
+            -- its data follows with the state sync)
+            if ok and err == "missing" then
+                m.till = m.till or now() + 10
+                if now() < m.till then gim.queue[#gim.queue + 1] = m end
+            end
+        end
+        if ok == false then say("gimmick error: %s", tostring(err)) end
     end
 end
 
 gimmick_reset = function()
     gim.sig, gim.sent_at, gim.applied_at, gim.contexts, gim.cursor, gim.out = {}, {}, {}, nil, 1, {}
+    gim.queue, gim.triggers, gim.trig_sent = {}, { by_addr = {}, by_key = {}, t = 0, chapter = "", forced = 0 }, {}
     gim.ids, gim.by_id = {}, {}
     gim.full_pending, gim.full_done_for, gim.flags_sent = nil, nil, { -1, -1 }
 end
@@ -2157,7 +2305,6 @@ local SIG_REMOVE = "removePanel(app.Inventory.PanelKey, app.ItemStockChangedEven
 local SIG_RELOAD = "reloadDirect(app.Inventory.PanelKey, System.Int32, app.ItemID)"
 local T_ITEM_ID = sdk.find_type_definition("app.ItemID")
 local T_INT2 = sdk.find_type_definition("via.Int2")
-local T_SCENE_MANAGER = sdk.find_type_definition("via.SceneManager")
 local TYPE_BOX_GIMMICK = sdk.typeof("app.GmItemBoxV2")
 local FLAG_OPS, FLAG_JOIN = 0, 1
 -- the stock event our box changes carry: "moved", as when the game's box moves an item
@@ -2310,20 +2457,11 @@ local function diff_ops(old, list, counts)
     return ops
 end
 
-local function scene_components(type_obj)
-    local sm = sdk.get_native_singleton("via.SceneManager")
-    local scene = sm and sdk.call_native_func(sm, T_SCENE_MANAGER, "get_CurrentScene")
-    local arr = scene and scene:call("findComponents(System.Type)", type_obj)
-    -- now and then the call hands back something that isn't an array
-    local ok, list = pcall(function() return arr and arr:get_elements() end)
-    return ok and list or {}
-end
-
 -- true while one of the item boxes here is in use (its menu may be open)
 local function box_in_use(t_now)
     if t_now >= box.gimmicks_t or box.gimmicks_chapter ~= me.chapter then
         box.gimmicks_t, box.gimmicks_chapter = t_now + 5, me.chapter
-        box.gimmicks = scene_components(TYPE_BOX_GIMMICK)
+        box.gimmicks = world.scene_components(TYPE_BOX_GIMMICK)
     end
     for _, g in ipairs(box.gimmicks) do
         local ok, idle = pcall(g.call, g, "get_IsStepTypeNone")
@@ -2417,12 +2555,15 @@ end
 
 -- Boxes are read and changed only inside the game's GUI update (GuiAutoSaveFlowController.update runs
 -- every frame), where the game's own item box moves items: changing an inventory from REFramework's
--- frame callbacks crashed the game a moment later on one of its worker threads.
+-- frame callbacks crashed the game a moment later on one of its worker threads. The partner's gimmick
+-- changes are applied here too.
 local M_GUI_UPDATE = sdk.find_type_definition("app.GuiAutoSaveFlowController"):get_method("update")
 if M_GUI_UPDATE then
     sdk.hook(M_GUI_UPDATE, function()
         local ok, err = pcall(box_late, now())
         if not ok then say("item box error: %s", tostring(err)) end
+        ok, err = pcall(gim.gui_tick)
+        if not ok then say("gimmick error: %s", tostring(err)) end
     end, nil)
 end
 
@@ -2441,7 +2582,7 @@ end
 -- not in a cutscene, alive, not loading, and saving allowed there (the game blocks it in some
 -- fights). To go on later: both load their latest save, host and join again; the lobby owner's world
 -- (locks, story, boxes) is sent on joining.
-local saves, saves_late
+local saves
 do
 local T_AUTOSAVE_ARGS = "app.GuiAutoSaveFlowRequestArgs"
 local PHASE_IDLE, PHASE_UPDATE = 0, 1
@@ -2511,7 +2652,7 @@ saves_ctrl = function(from, kind, data)
     say("the host saved: saving here too")
 end
 
-saves_late = function(t_now)
+saves.late = function(t_now)
     -- the lobby owner: did our game just save into a game slot?
     if t_now >= saves.serial_t then
         saves.serial_t = t_now + 1
@@ -2683,7 +2824,7 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("gimmick error: %s", tostring(err)) end
     ok, err = pcall(story_late, t_now)
     if not ok then say("story error: %s", tostring(err)) end
-    ok, err = pcall(saves_late, t_now)
+    ok, err = pcall(saves.late, t_now)
     if not ok then say("save error: %s", tostring(err)) end
 end)
 
@@ -2810,7 +2951,8 @@ re.on_draw_ui(function()
     end
     imgui.text(string.format("Doors: sent %d, opened for partner %d. Pickups: sent %d, removed %d.",
         world.stats.doors_sent, world.stats.doors_applied, world.stats.items_sent, world.stats.items_applied))
-    imgui.text(string.format("Locks, puzzles, switches: sent %d, applied %d.", gim.stats.sent, gim.stats.applied))
+    imgui.text(string.format("Locks, puzzles, switches: sent %d, applied %d. Keys / items used: sent %d, replayed %d.",
+        gim.stats.sent, gim.stats.applied, gim.stats.live_sent, gim.stats.live_applied))
     imgui.text(string.format("Story steps: sent %d, applied %d. Chapter jumps %d.", story.stats.sent, story.stats.applied, story.stats.jumps))
     imgui.text(string.format("Item box: changes sent %d, applied %d. Saves: told partner %d, saved with host %d.",
         box.stats.sent, box.stats.applied, saves.stats.sent, saves.stats.made))
@@ -2850,4 +2992,4 @@ end
 _G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes,
     teleport_to_partner = teleport_to_partner, world = world, gim = gim, story = story,
     go_to_partner_chapter = go_to_partner_chapter, box = box, box_ctrl = box_ctrl, saves = saves,
-    saves_ctrl = saves_ctrl }
+    saves_ctrl = saves_ctrl, gimmick_ctrl = gimmick_ctrl }

@@ -286,6 +286,28 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
   only flips through the key-use scene (`GmUseKeyItemV3`). Not shipped.
 - Occasionally `scene:findComponents(Type)` hands back a non-array; lookups are pcall'd now.
 
+## v0.6.1 status (2026-10-14 21:50) — live locks and gimmicks
+
+- `GmLockV2` unlocks on interact triggers named in `_UnlockParams[i]._TriggerName` (bound through
+  `IInteractTriggerInitializer.initializeInteractTrigger`). Triggers live in holder components on the
+  same GameObject (`InteractTrigger*Holder._Triggers`: KeyInput "Interact", KeyItemInventory
+  "UseKeyItem_Success/Failed/None", "Inventory_Open/Close", GimmickEvent "TurnOff", "SuccessEnd",
+  GmStructureData "MotionEnd", "Unlock"...). 2064 triggers in Chap3_02.
+  Gm02_028: unlock on "UseKeyItem_Success"; Gm02_021 (security lock of gate Gm01_148): "TurnOff" (sent
+  by the key scene's end); Gm02_042: "MotionEnd".
+- Calling `InteractTrigger.onProcessEvent(go)` on that trigger (go = the gimmick's GameObject) opens
+  the lock the game's way: `_GmLockData._UnlockCount` 1/1, `_IsDone`, target `_IsLock` false, no
+  player scene. Gate Gm01_148 then opened with F (door `IsDoorOpen` true).
+- `GimmickContext.restore()` replaces the SDC's StructureData objects, but running components keep
+  references to the old ones (`GmLockV2._GmLockData` / `GmSwitchV2._GmSwitchData` == SDC object before
+  any restore). Writing fields straight into `StructureDataContainer._Structures[i]` reaches the running
+  gimmick: switch Gm19_009 `_GmSwitchData._Index` 0 -> 2, its `_CurrIndex` followed once the player was
+  near (gimmicks far away don't update).
+- Right after a load, gimmick components' `_Context` is nil for a few seconds: indexes built then miss
+  them; the replay retries for 10 s and forces an index rebuild (at most every 2 s).
+- Echo: a replay's own trigger chain isn't sent back (5 s per context), each trigger is sent once per
+  10 s, and an already open lock isn't opened again.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
