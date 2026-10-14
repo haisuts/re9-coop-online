@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.6.1"
-local PROTO = 5
+local VERSION = "0.7.0"
+local PROTO = 6
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -46,6 +46,8 @@ local cfg = {
     follow_host = true,       -- the guest goes to the host's chapter
     box_sync = true,          -- one item box for both players
     save_with_host = true,    -- the guest's game autosaves whenever the host's game saves
+    revive = true,            -- a lethal hit downs you while your partner is with you; they get you up
+    pickups_for_both = false, -- ammo, healing and crafting items too: each player picks up their own
     public_lobby = false,     -- anyone with the lobby ID can join (otherwise friends and invitees)
 }
 
@@ -296,9 +298,9 @@ local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
 local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
-local MSG_BOX, MSG_SAVE = 22, 23
-local MSG_GIMMICK_TRIGGER = 24
+local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26 }
 local FLAG_CUTSCENE = 64
+local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
 local function q16(v)
@@ -354,6 +356,8 @@ local function local_flags()
     end
     if me.pc:call("get_IsFPSCharacter") then f = f | 16 end
     if in_cutscene and in_cutscene() then f = f | FLAG_CUTSCENE end
+    if me.down then f = f | FLAG_DOWN end
+    if me.grabbed then f = f | FLAG_GRABBED end
     local fc = me.flashlight
     if fc and fc:get_field("_IsLighting") and fc:get_field("_CurrentLightObject") and fc:get_field("_CurrentLight") then
         f = f | FLAG_FLASHLIGHT
@@ -685,7 +689,7 @@ local enemy_ctrl, enemy_recv, enemies_reset -- set in the "shared enemies" secti
 local world_ctrl, world_reset -- set in the "shared doors and pickups" section
 local gimmick_ctrl, gimmick_reset -- set in the "shared gimmick states" section
 local story_ctrl, story_reset, go_to_partner_chapter -- set in the "story" section
-local box_ctrl, box_reset, saves_ctrl -- set in the "item box" and "saving together" sections
+local ext = {} -- functions set by the later sections (item box, saves, downed / grabbed)
 local loopback = false
 local stats = { tx = 0, rx = 0, tx_bytes = 0, rx_bytes = 0, rate_t = 0, tx_kbps = 0, rx_kbps = 0 }
 
@@ -754,7 +758,7 @@ on_player_lost = function()
     if world_reset then world_reset() end
     if gimmick_reset then gimmick_reset() end
     if story_reset then story_reset() end
-    if box_reset then box_reset() end
+    if ext.box_reset then ext.box_reset() end
 end
 
 local function send_ctrl(data, to)
@@ -806,14 +810,16 @@ local function on_ctrl(from, data)
         enemy_ctrl(from, kind, data)
     elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN) and world_ctrl then
         world_ctrl(from, kind, data)
-    elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS or kind == MSG_GIMMICK_TRIGGER) and gimmick_ctrl then
+    elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS or kind == MSG.GIMMICK_TRIGGER) and gimmick_ctrl then
         gimmick_ctrl(from, kind, data)
     elseif kind == MSG_STORY and story_ctrl then
         story_ctrl(from, kind, data)
-    elseif kind == MSG_BOX and box_ctrl then
-        box_ctrl(from, kind, data)
-    elseif kind == MSG_SAVE and saves_ctrl then
-        saves_ctrl(from, kind, data)
+    elseif kind == MSG.BOX and ext.box_ctrl then
+        ext.box_ctrl(from, kind, data)
+    elseif kind == MSG.SAVE and ext.saves_ctrl then
+        ext.saves_ctrl(from, kind, data)
+    elseif (kind == MSG.REVIVE or kind == MSG.RESCUE) and ext.life_ctrl then
+        ext.life_ctrl(from, kind, data)
     end
 end
 
@@ -1300,6 +1306,7 @@ enemy_ctrl = function(from, kind, data)
         if e and foes.owner[id] ~= false and e.ctx:call("get_IsSpawn") then
             apply_damage(e, which, dmg, b1 == 1, b2 == 1)
             foes.stats.dmg_applied = foes.stats.dmg_applied + 1
+            if me.on_partner_hit then pcall(me.on_partner_hit, e) end
         end
     elseif kind == MSG_ENEMY_OWNERS then
         if foes.arbiter or foes.test then return end
@@ -1629,8 +1636,35 @@ sdk.hook(M_DOOR_FORCE, function(args)
         info:get_field("Force") or 1.0, (info:get_field("ForceDir") or 1) & 0xFFFFFFFF)
 end, nil)
 
+-- Items each player gets their own copy of: picking one up here leaves the partner's copy for them
+-- (weapons, key items, files, maps, upgrades...). Ammo, healing and crafting materials are shared:
+-- whoever takes them first (unless "each player picks up their own" is on).
+local PERSONAL = { Weapon = true, SubWeapon = true, Armor = true, Attachment = true, Charm = true, KeyItem = true,
+    Map = true, Procedure = true, Storage = true, Flag = true, Other = true }
+local item_cats = {}
+
+local function item_category(core)
+    local ok, id = pcall(core.call, core, "get_ItemID")
+    local name = ok and id and id:get_field("_Name")
+    if not name then return nil end
+    local cat = item_cats[name]
+    if cat == nil then
+        local m = sdk.get_managed_singleton("app.ItemManager")
+        local catalog = m and m:get_field("_ItemCatalog")
+        local okd, d = pcall(function() return catalog:call("getValue(app.ItemID, app.ItemDetailData)", id, nil) end)
+        local okc, c = pcall(function() return d:get_field("_ItemCategory"):call("ToString") end)
+        cat = (okd and okc and c) or false
+        item_cats[name] = cat
+    end
+    return cat or nil
+end
+world.item_category = item_category
+
 sdk.hook(M_ITEM_PICKED, function(args)
     if world.applying or not world_shared() or (sdk.to_int64(args[3]) & 1) == 0 then return end
+    if cfg.pickups_for_both then return end
+    local core = sdk.to_managed_object(args[2])
+    if core and PERSONAL[item_category(core) or ""] then return end
     local id = world.item_ids[sdk.to_int64(args[2])]
     if id and #world.out < 32 then
         world.out[#world.out + 1] = string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id)
@@ -1962,6 +1996,7 @@ end
 local function replayable(name)
     return key_outcome(name) or name == "TurnOff" or name == "Unlock"
 end
+gim.trigger_index = trigger_index
 
 sdk.hook(M_TRIGGER_PROCESS, function(args)
     if gim.trigger_applying or not cfg.gimmick_sync or not world_shared() then return end
@@ -1982,7 +2017,7 @@ sdk.hook(M_TRIGGER_PROCESS, function(args)
     if t_now - (gim.applied_at[e.id] or -10) < 5 or t_now - (gim.trig_sent[key] or -10) < 10 then return end
     gim.trig_sent[key] = t_now
     if #gim.out < 64 then
-        gim.out[#gim.out + 1] = string.pack("<Bs1s1s1", MSG_GIMMICK_TRIGGER, me.chapter, e.id, e.name)
+        gim.out[#gim.out + 1] = string.pack("<Bs1s1s1", MSG.GIMMICK_TRIGGER, me.chapter, e.id, e.name)
         gim.stats.live_sent = gim.stats.live_sent + 1
     end
 end, nil)
@@ -2074,7 +2109,7 @@ gim.gui_tick = function()
             ok, err = pcall(apply_gimmick, m.data)
         elseif m.kind == MSG_GIMMICK_FLAGS then
             ok, err = pcall(apply_gimmick_flags, m.data)
-        elseif m.kind == MSG_GIMMICK_TRIGGER then
+        elseif m.kind == MSG.GIMMICK_TRIGGER then
             ok, err = pcall(apply_trigger, m.data)
             -- the gimmick may not be indexed yet: try again for 10 s (if it isn't loaded here at all,
             -- its data follows with the state sync)
@@ -2377,7 +2412,7 @@ local function read_box(inv)
 end
 
 local function pack_box(key, flag, ops)
-    local t = { string.pack("<Bs1BH", MSG_BOX, key, flag, #ops) }
+    local t = { string.pack("<Bs1BH", MSG.BOX, key, flag, #ops) }
     for _, op in ipairs(ops) do t[#t + 1] = string.pack("<s2", op) end
     return table.concat(t)
 end
@@ -2490,7 +2525,7 @@ local function join_merge(key, inv, entries, from)
     say("item box %s: got %d, sent %d", key, #ops_here, #ops_there)
 end
 
-box_ctrl = function(from, kind, data)
+ext.box_ctrl = function(from, kind, data)
     -- our own echo (self test) would put everything in twice
     if from == LOOPBACK_ID or not world_shared() or not cfg.box_sync then return end
     local _, key, flag, n, pos = string.unpack("<Bs1BH", data)
@@ -2499,7 +2534,7 @@ box_ctrl = function(from, kind, data)
     if #box.queue < 256 then box.queue[#box.queue + 1] = { key = key, flag = flag, ops = ops, from = from } end
 end
 
-box_reset = function()
+ext.box_reset = function()
     box.gimmicks, box.gimmicks_t = {}, 0
 end
 
@@ -2564,6 +2599,10 @@ if M_GUI_UPDATE then
         if not ok then say("item box error: %s", tostring(err)) end
         ok, err = pcall(gim.gui_tick)
         if not ok then say("gimmick error: %s", tostring(err)) end
+        if ext.life_gui then
+            ok, err = pcall(ext.life_gui)
+            if not ok then say("grab error: %s", tostring(err)) end
+        end
     end, nil)
 end
 
@@ -2644,7 +2683,7 @@ local function make_save()
     return ok
 end
 
-saves_ctrl = function(from, kind, data)
+ext.saves_ctrl = function(from, kind, data)
     local st_net = session.status
     if not world_shared() or not cfg.save_with_host or not st_net or from ~= st_net.owner or st_net.is_host then return end
     local _, chapter = string.unpack("<Bs1", data)
@@ -2669,7 +2708,7 @@ saves.late = function(t_now)
             if slot ~= nil or t_now > w.till then saves.wait_slot = nil end
             local st_net = session.status
             if slot ~= nil and slot >= 0 and world_shared() and st_net and st_net.is_host and t_now >= saves.own_until then
-                send_ctrl(string.pack("<Bs1", MSG_SAVE, me.chapter))
+                send_ctrl(string.pack("<Bs1", MSG.SAVE, me.chapter))
                 saves.stats.sent = saves.stats.sent + 1
                 say("saved: your partner's game saves too")
             end
@@ -2688,6 +2727,255 @@ end
 
 -- dev: the slot a serial number went to, and a save the guest way
 saves.slot_of_serial, saves.make_save, saves.can_save_now = slot_of_serial, make_save, can_save_now
+end
+
+-------------------------------------------------------------------------------------------------
+-- downed and revived, grabbed and rescued
+-------------------------------------------------------------------------------------------------
+-- Downed: while a partner is with you (same chapter, connected), the game's own "can't die" request
+-- (HitPoint.NoDeath) is on, so a hit that would kill you leaves you at 1 HP, and you go down: no
+-- moving, aiming or items (the game's player restrictions, requested every frame), no more damage
+-- (Invincible), and a grab on you is ended. Your partner crouches next to you for a moment to get you
+-- up with a third of your health. If nobody does within 90 s, your partner leaves, or you both go
+-- down, you die the game's way (game over, back to the last checkpoint).
+-- Grabbed: the game's grapple controller (GrappleFsmController.requestGrapple / startGrapple with our
+-- player among its participants) tells us we're held. Your partner frees you by hurting the enemy that
+-- holds you (their hits on it reach your game) or by a melee attack (knife, kick) next to you; the grab
+-- is ended with GrappleFsmController.forceEndGrapple, inside the game's GUI update.
+do
+local REVIVE_TIME, BLEED_OUT, PARTNER_GONE = 2.5, 90, 10
+local REVIVE_RANGE, RESCUE_RANGE = 1.8, 2.5
+-- Walk, Run, Move, Terrain, Hold, InventoryOpen, Crouch, EquipmentWeapon, QuickTurn, MeleeWepAttack,
+-- Stumble, Cover (the camera stays free)
+local RESTRICT_DOWN = 1 | 2 | 4 | 8 | 16 | 64 | 128 | 256 | 512 | 8192 | 16384 | 32768
+local LABEL = "re9coop"
+local SIG_DAMAGE = "addDamageHitPoint(System.Int32, System.Boolean, System.Boolean)"
+local SIG_RECOVERY = "recovery(System.Int32, app.HitPoint.RecoveryFactor)"
+local M_DAMAGE = sdk.find_type_definition("app.HitPoint"):get_method(SIG_DAMAGE)
+local T_GRAPPLE = sdk.find_type_definition("app.GrappleFsmController")
+
+local life = {
+    hp = nil, hp_addr = 0, nodeath = false,
+    down_since = nil, lethal_t = -10, alone_since = nil, both_since = nil, invincible_until = 0,
+    dead = false,         -- we died: nothing more until the game brings a new player object
+    grab = nil, end_grab = false,
+    revive_t = 0, revive_for = nil, rescue_t = 0,
+    stats = { downs = 0, revived = 0, rescues = 0 },
+}
+ext.life = life
+
+local function partner_here()
+    local p = partner_to_follow and partner_to_follow()
+    if p == nil or (p.id == LOOPBACK_ID and not _G.re9coop_test_life) then return nil end
+    if p.chapter ~= me.chapter or now() - p.last > 3 then return nil end
+    return p
+end
+
+local function partner_pos(p)
+    local s = p.snaps[#p.snaps]
+    return s and s.pos
+end
+
+local function my_pos()
+    return me.go and me.go:call("get_Transform"):call("get_Position")
+end
+
+local function set_nodeath(on)
+    if on == life.nodeath or life.hp == nil then return end
+    local ok, nd = pcall(life.hp.call, life.hp, "get_NoDeath")
+    if not ok or nd == nil then return end
+    if on then
+        pcall(nd.call, nd, "request(System.String, System.Boolean)", LABEL, true)
+    else
+        pcall(nd.call, nd, "clear(System.String)", LABEL)
+    end
+    life.nodeath = on
+end
+
+local function go_down(t_now)
+    life.down_since, life.alone_since, life.both_since = t_now, nil, nil
+    me.down = true
+    pcall(life.hp.call, life.hp, "set_Invincible", true)
+    if life.grab then life.end_grab = true end
+    life.stats.downs = life.stats.downs + 1
+    say("you're down: your partner can get you up (crouch next to you)")
+end
+
+local function get_up(t_now, ratio)
+    if not life.down_since then return end
+    life.down_since, me.down = nil, false
+    local hp = life.hp
+    local max = hp:call("get_CurrentMaximumHitPoint") or 0
+    local cur = hp:call("get_CurrentHitPoint") or 0
+    local want = math.floor(max * ratio)
+    if want > cur then pcall(hp.call, hp, SIG_RECOVERY, want - cur, nil) end
+    life.invincible_until = t_now + 2 -- a moment to get away
+    life.stats.revived = life.stats.revived + 1
+    say("back on your feet")
+end
+
+-- die the game's way (game over)
+local function die()
+    life.down_since, me.down, life.dead = nil, false, true
+    set_nodeath(false)
+    local hp = life.hp
+    pcall(hp.call, hp, "set_Invincible", false)
+    foes.bypass = true -- not a hit on a shared enemy
+    pcall(hp.call, hp, SIG_DAMAGE, 999999, false, true)
+    foes.bypass = false
+    say("you didn't make it")
+end
+
+-- a hit that would kill us (NoDeath keeps 1 HP): down
+sdk.hook(M_DAMAGE, function(args)
+    if not life.nodeath or life.down_since or sdk.to_int64(args[2]) ~= life.hp_addr then return end
+    local cur = life.hp:call("get_CurrentHitPoint") or 0
+    if cur - int32(sdk.to_int64(args[3])) <= 0 then life.lethal_t = now() end
+end, nil)
+
+-- grabs that include our player
+local function grapple_hook(args)
+    if me.go == nil then return end
+    local arr = sdk.to_managed_object(args[3])
+    local ok, list = pcall(function() return arr:get_elements() end)
+    if not ok then return end
+    local mine, others = false, {}
+    local my_addr = me.go:get_address()
+    for _, g in ipairs(list) do
+        local a = g:get_address()
+        if a == my_addr then mine = true else others[a] = true end
+    end
+    if mine then
+        life.grab = { ctl = sdk.to_managed_object(args[2]), enemies = others, since = now() }
+        if life.down_since then life.end_grab = true end
+    end
+end
+for _, m in ipairs(T_GRAPPLE:get_methods()) do
+    local n = m:get_name()
+    if n == "requestGrapple" or n == "startGrapple" then sdk.hook(m, grapple_hook, nil) end
+end
+
+-- the partner hit an enemy of ours: if it is the one holding us, we're free
+me.on_partner_hit = function(e)
+    local g = life.grab
+    if g == nil then return end
+    local ctl = spawn_control(e)
+    local go = ctl and ctl:call("getSpawnInstance")
+    if go and g.enemies[go:get_address()] then
+        life.end_grab = true
+        life.stats.rescues = life.stats.rescues + 1
+    end
+end
+
+ext.life_ctrl = function(from, kind, data)
+    if kind == MSG.REVIVE then
+        if life.down_since then get_up(now(), 0.35) end
+    elseif kind == MSG.RESCUE then
+        if life.grab then
+            life.end_grab = true
+            life.stats.rescues = life.stats.rescues + 1
+        end
+    end
+end
+
+-- before the player's update: keep NoDeath / restrictions right, notice going down
+ext.life_tick = function(t_now)
+    local hp = me.pc and me.pc:call("get_HitPoint")
+    local addr = hp and hp:get_address() or 0
+    if addr ~= life.hp_addr then -- a new player object (load, chapter, game over)
+        life.hp, life.hp_addr, life.nodeath, life.dead = hp, addr, false, false
+        life.down_since, life.grab, life.end_grab, me.down, me.grabbed = nil, nil, false, false, false
+    end
+    if hp == nil or life.dead then return end
+    if hp:call("get_IsDead") or (life.down_since == nil and (hp:call("get_CurrentHitPoint") or 0) <= 0) then
+        life.dead, me.down = true, false -- died some other way (a fall, a scripted death)
+        set_nodeath(false)
+        return
+    end
+    local p = partner_here()
+    if life.down_since == nil then
+        set_nodeath(p ~= nil and cfg.revive and world_shared())
+        if life.nodeath and (hp:call("get_CurrentHitPoint") or 0) <= 1 and t_now - life.lethal_t < 2 then
+            go_down(t_now)
+        end
+        if life.invincible_until > 0 and t_now >= life.invincible_until then
+            life.invincible_until = 0
+            pcall(hp.call, hp, "set_Invincible", false)
+        end
+    else
+        local u = me.pc:call("get_CharacterUpdaterBase")
+        local core = u and u:call("get_RestrictBlackboardCore")
+        local unit = core and core:get_field("<Unit>k__BackingField")
+        if unit then pcall(unit.call, unit, "requestRestrictionAction", RESTRICT_DOWN) end
+        if p then life.alone_since = nil else life.alone_since = life.alone_since or t_now end
+        if p and p.flags and p.flags & FLAG_DOWN ~= 0 then
+            life.both_since = life.both_since or t_now
+        else
+            life.both_since = nil
+        end
+        if t_now - life.down_since > BLEED_OUT or (life.alone_since and t_now - life.alone_since > PARTNER_GONE)
+            or (life.both_since and t_now - life.both_since > 3) then
+            die()
+        end
+    end
+    if life.grab and not life.grab.ctl:call("get_IsPlaying") then life.grab, life.end_grab = nil, false end
+    me.grabbed = life.grab ~= nil
+
+    -- helping the partner: crouch next to them when they're down, melee next to them when grabbed
+    life.revive_for = nil
+    if p and me.go and not life.down_since then
+        local pp, mp = partner_pos(p), my_pos()
+        local d = pp and mp and (pp - mp):length() or 99
+        local common = me.pc:call("get_Common")
+        if p.flags and p.flags & FLAG_DOWN ~= 0 and d <= REVIVE_RANGE and common and common:call("get_IsCrouch") then
+            life.revive_t = life.revive_t + (t_now - (life.revive_last or t_now))
+            life.revive_for = p
+            if life.revive_t >= REVIVE_TIME then
+                life.revive_t = 0
+                send_ctrl(string.pack("<B", MSG.REVIVE), p.id)
+            end
+        else
+            life.revive_t = 0
+        end
+        local grabbed = p.flags and p.flags & FLAG_GRABBED ~= 0
+        if grabbed and d <= RESCUE_RANGE and common and common:call("get_IsMeleeAttack") and t_now - life.rescue_t > 1 then
+            life.rescue_t = t_now
+            send_ctrl(string.pack("<B", MSG.RESCUE), p.id)
+        end
+    end
+    life.revive_last = t_now
+end
+
+-- inside the game's GUI update: end a grab
+ext.life_gui = function()
+    if life.end_grab and life.grab then
+        life.end_grab = false
+        pcall(life.grab.ctl.call, life.grab.ctl, "forceEndGrapple(System.Boolean)", false)
+    end
+end
+
+ext.life_draw = function()
+    local cx = 960
+    if life.down_since and not life.dead then
+        local left = math.max(0, math.ceil(BLEED_OUT - (now() - life.down_since)))
+        local msg = string.format("You're down. Your partner can get you up (crouch next to you). %d s", left)
+        draw.text(msg, cx - #msg * 3.5, 520, 0xFF4040FF)
+    end
+    for _, p in pairs(peers) do
+        local pup = p.puppet
+        local hpos = pup and pup.state == "ready" and pup:head_position()
+        local sp = hpos and draw.world_to_screen(hpos + Vector3f.new(0, 0.6, 0))
+        if p.flags and p.flags & FLAG_DOWN ~= 0 then
+            local msg = life.revive_for == p and string.format("Getting %s up... %d%%", p.name, math.floor(life.revive_t * 100 / REVIVE_TIME))
+                or string.format("%s is down: crouch next to them", p.name)
+            if sp then draw.text(msg, sp.x - #msg * 3.5, sp.y, 0xFF4040FF) end
+            draw.text(msg, cx - #msg * 3.5, 560, 0xFF4040FF)
+        elseif p.flags and p.flags & FLAG_GRABBED ~= 0 then
+            local msg = string.format("%s is grabbed: shoot the enemy or hit it next to them", p.name)
+            if sp then draw.text(msg, sp.x - #msg * 3.5, sp.y, 0xFF40A0FF) end
+        end
+    end
+end
 end
 
 
@@ -2801,6 +3089,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
         receive()
         for _, p in pairs(peers) do update_peer(p, t_now) end
         enemies_update(t_now)
+        if ext.life_tick then ext.life_tick(t_now) end
     end)
     if not ok then say("error: %s", tostring(err)) end
     if t_now - stats.rate_t >= 1 then
@@ -2842,6 +3131,7 @@ re.on_frame(function()
             or string.format("Going to %s...", story.follow.target)
         draw.text(msg, 960 - #msg * 3.5, 60, 0xFF80FFFF)
     end
+    if ext.life_draw then pcall(ext.life_draw) end
     if not cfg.nametags then return end
     for _, p in pairs(peers) do
         local pup = p.puppet
@@ -2970,6 +3260,8 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Follow the host to new chapters (guest)", cfg.follow_host); if c then cfg.follow_host, changed = v, true end
     c, v = imgui.checkbox("One item box for both players", cfg.box_sync); if c then cfg.box_sync, changed = v, true end
     c, v = imgui.checkbox("Save when the host saves (guest; an autosave)", cfg.save_with_host); if c then cfg.save_with_host, changed = v, true end
+    c, v = imgui.checkbox("Go down instead of dying while your partner is with you", cfg.revive); if c then cfg.revive, changed = v, true end
+    c, v = imgui.checkbox("Ammo, healing and materials: each player picks up their own", cfg.pickups_for_both); if c then cfg.pickups_for_both, changed = v, true end
     c, v = imgui.checkbox("Name tags", cfg.nametags); if c then cfg.nametags, changed = v, true end
     c, v = imgui.slider_int("Pose updates per second", cfg.send_hz, 5, 30); if c then cfg.send_hz, changed = v, true end
     c, v = imgui.slider_float("Smoothing delay (s)", cfg.interp_delay, 0.05, 0.4); if c then cfg.interp_delay, changed = v, true end
@@ -2991,5 +3283,22 @@ end
 -- dev hooks for automated tests (harmless in normal play)
 _G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes,
     teleport_to_partner = teleport_to_partner, world = world, gim = gim, story = story,
-    go_to_partner_chapter = go_to_partner_chapter, box = box, box_ctrl = box_ctrl, saves = saves,
-    saves_ctrl = saves_ctrl, gimmick_ctrl = gimmick_ctrl }
+    go_to_partner_chapter = go_to_partner_chapter, box = box, saves = saves, gimmick_ctrl = gimmick_ctrl, ext = ext,
+    -- what every part of the mod sees in this chapter (for the chapter-by-chapter test)
+    selftest = function()
+        local function count(t) local n = 0 for _ in pairs(t or {}) do n = n + 1 end return n end
+        local echo = peers[LOOPBACK_ID]
+        local r = { chapter = me.chapter, kind = me.kind, player = me.go ~= nil,
+            echo = echo and (echo.puppet and echo.puppet.state or "no puppet") or "off",
+            enemies = count(foes.index), gimmicks = gim.contexts and #gim.contexts or 0,
+            triggers = count(gim.trigger_index(now(), true).by_key), doors = count(world.doors), items = count(world.items),
+            boxes = count(box.box_inventories()), weapon = me.weapon_blob and #me.weapon_blob or 0,
+            nodeath = ext.life and ext.life.nodeath, cutscene = in_cutscene() }
+        local lf = sdk.get_managed_singleton("app.LevelFlowManager")
+        local d = lf and lf:get_field("_ProgressiveNumberList")
+        r.flows = d and d:get_field("_count") or 0
+        local log = {}
+        for i = math.max(1, #recent_log - 4), #recent_log do log[#log + 1] = recent_log[i] end
+        r.log = log
+        return r
+    end }
