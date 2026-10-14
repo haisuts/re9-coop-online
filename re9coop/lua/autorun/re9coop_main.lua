@@ -101,6 +101,13 @@ local function say(fmt, ...)
     if #recent_log > 12 then table.remove(recent_log) end
 end
 
+-- The elements of a managed array; now and then a call hands back something that isn't one.
+local function elements(arr)
+    if arr == nil then return {} end
+    local ok, list = pcall(arr.get_elements, arr)
+    return ok and list or {}
+end
+
 local function now()
     local app = sdk.get_native_singleton("via.Application")
     if app == nil then return os.clock() end
@@ -254,6 +261,11 @@ local function refresh_player()
         return false
     end
     local a = addr(go)
+    -- a scene change was requested: the old player object is on its way out, leave it alone
+    if me.leaving then
+        if a == me.leaving.addr and now() < me.leaving.till then return false end
+        me.leaving = nil
+    end
     if a ~= me.go_addr then
         forget_player()
         me.pc, me.go, me.go_addr = pc, go, a
@@ -507,7 +519,7 @@ function Puppet:build_step()
     self.loads = {}
     local by_name = {}
     local js = rtr:call("get_Joints")
-    for _, j in ipairs(js and js:get_elements() or {}) do by_name[j:call("get_Name")] = j end
+    for _, j in ipairs(elements(js)) do by_name[j:call("get_Name")] = j end
     self.jmap = {}
     for i, n in ipairs(self.appear.names) do self.jmap[i] = by_name[n] or false end
     self.j_root, self.j_hip = by_name["root"], by_name["Hip"]
@@ -689,7 +701,14 @@ local enemy_ctrl, enemy_recv, enemies_reset -- set in the "shared enemies" secti
 local world_ctrl, world_reset -- set in the "shared doors and pickups" section
 local gimmick_ctrl, gimmick_reset -- set in the "shared gimmick states" section
 local story_ctrl, story_reset, go_to_partner_chapter -- set in the "story" section
-local ext = {} -- functions set by the later sections (item box, saves, downed / grabbed)
+-- Functions set by the later sections (item box, saves, downed / grabbed), and the jobs that must run
+-- inside the game's GUI update: everything that changes the game's world (scene jumps, story steps,
+-- doors, pickups, saves, inventories). Done from REFramework's frame callbacks, such changes crashed
+-- the game a moment later on one of its worker threads (heap corruption, mostly in its lock-on scan).
+local ext = { jobs = {} }
+ext.later = function(fn)
+    if #ext.jobs < 1024 then ext.jobs[#ext.jobs + 1] = fn end
+end
 local loopback = false
 local stats = { tx = 0, rx = 0, tx_bytes = 0, rx_bytes = 0, rate_t = 0, tx_kbps = 0, rx_kbps = 0 }
 
@@ -809,11 +828,11 @@ local function on_ctrl(from, data)
     elseif kind >= MSG_ENEMY and kind <= MSG_ENEMY_PRESENCE and enemy_ctrl then
         enemy_ctrl(from, kind, data)
     elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN) and world_ctrl then
-        world_ctrl(from, kind, data)
+        ext.later(function() world_ctrl(from, kind, data) end)
     elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS or kind == MSG.GIMMICK_TRIGGER) and gimmick_ctrl then
         gimmick_ctrl(from, kind, data)
     elseif kind == MSG_STORY and story_ctrl then
-        story_ctrl(from, kind, data)
+        ext.later(function() story_ctrl(from, kind, data) end)
     elseif kind == MSG.BOX and ext.box_ctrl then
         ext.box_ctrl(from, kind, data)
     elseif kind == MSG.SAVE and ext.saves_ctrl then
@@ -1470,7 +1489,7 @@ local function build_jmap(pup)
     end
     local by = {}
     local js = pup.go:call("get_Transform"):call("get_Joints")
-    for _, j in ipairs(js and js:get_elements() or {}) do by[j:call("get_Name")] = j end
+    for _, j in ipairs(elements(js)) do by[j:call("get_Name")] = j end
     pup.jmap = {}
     for i, n in ipairs(names) do pup.jmap[i] = by[n] or false end
     pup.j_hip = by["Hip"]
@@ -1827,7 +1846,7 @@ local function gimmick_state(gc)
     local save = gc:call("store")
     local arr = save and save:get_field("_StructureDatas")
     local entries, parts = {}, {}
-    for _, x in ipairs(arr and arr:get_elements() or {}) do
+    for _, x in ipairs(elements(arr)) do
         local tname, fields = logical_fields(x)
         for _, fd in ipairs(fields) do
             local ok, v = pcall(x.get_field, x, fd[1])
@@ -1852,7 +1871,7 @@ local function gimmick_contexts(t_now)
     if gim.contexts == nil or t_now >= gim.contexts_t or gim.chapter ~= me.chapter then
         local gm = gimmick_manager()
         local arr = gm and gm:get_field("_GimmickContextCache")
-        gim.contexts = arr and arr:get_elements() or {}
+        gim.contexts = elements(arr)
         gim.contexts_t, gim.chapter = t_now + 10, me.chapter
         gim.ids, gim.by_id = {}, {}
         for _, gc in ipairs(gim.contexts) do
@@ -1969,7 +1988,9 @@ local function trigger_index(t_now, force)
         local ok, id = pcall(function() return core:call("get_ContextID"):call("ToString") end)
         if not ok or not id then return end
         local lock = go:call("getComponent(System.Type)", TYPE_LOCK)
-        for _, c in ipairs(go:call("get_Components"):get_elements()) do
+        -- now and then get_Components hands back something that isn't an array
+        local okc, comps = pcall(function() return go:call("get_Components"):get_elements() end)
+        for _, c in ipairs(okc and comps or {}) do
             local okt, trs = pcall(function() return c:get_field("_Triggers"):get_elements() end)
             for _, t in ipairs(okt and trs or {}) do
                 local name = t:get_field("_Name")
@@ -2197,7 +2218,7 @@ local function progress_list()
     local n = d and d:get_field("_count") or 0
     local out = {}
     if entries then
-        for i, e in ipairs(entries:get_elements()) do
+        for i, e in ipairs(elements(entries)) do
             if i > n then break end
             local h = e:get_field("hashCode")
             if h and h >= 0 then out[e:get_field("key")] = e:get_field("value") end
@@ -2235,8 +2256,10 @@ local function jump_to_chapter(name)
     local mg = sdk.get_managed_singleton("app.MainGameFlowManager")
     local lf = level_flow()
     if mg == nil or lf == nil then return false end
-    pcall(mg.call, mg, "setOverrideNextJumpScene", name)
-    pcall(lf.call, lf, "requestGameJump")
+    ext.later(function()
+        pcall(mg.call, mg, "setOverrideNextJumpScene", name)
+        pcall(lf.call, lf, "requestGameJump")
+    end)
     story.stats.jumps = story.stats.jumps + 1
     say("going to %s", name)
     return true
@@ -2331,7 +2354,7 @@ end
 -- has a box open: then it waits until they close it. Operations never lose an item: if both players
 -- take the same thing at the same moment, both get it. On joining, the lobby owner sends its boxes;
 -- the guest's game puts in what it lacks and sends back what the owner lacks.
-local box, box_late
+local box
 do
 local BOX_BOARDS = { [1] = true, [2] = true } -- app.InventoryType: ItemBox, ShareItemBox
 local SIG_ADD = "addPanel(app.ItemID, System.Int32, via.Int2, app.InventoryPanelRotateType, app.ItemStockChangedEventType)"
@@ -2362,7 +2385,7 @@ local function box_inventories()
     local n = d and d:get_field("_count") or 0
     local out = {}
     if entries == nil then return out end
-    for i, e in ipairs(entries:get_elements()) do
+    for i, e in ipairs(elements(entries)) do
         if i > n then break end
         local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
         local k = inv and inv:get_field("_InventoryKey")
@@ -2384,7 +2407,7 @@ local function panel_entry(st)
     if not name then return nil end
     local loads = {}
     local li = st:call("get_LoadingItems")
-    for _, c in ipairs(li and li:get_elements() or {}) do
+    for _, c in ipairs(elements(li)) do
         local ad = c:get_field("_AmountData")
         local an, as = ad and ad:get_field("_ItemID"), ad and ad:get_field("_Stock")
         if an and as and as > 0 then loads[#loads + 1] = an .. ":" .. as end
@@ -2400,7 +2423,7 @@ local function ident(e) return e:match("^[^@]*") end
 local function read_box(inv)
     local list, counts = {}, {}
     local sts = inv:call("getPanelStates")
-    for _, st in ipairs(sts and sts:get_elements() or {}) do
+    for _, st in ipairs(elements(sts)) do
         local e = panel_entry(st)
         if e then
             local id = ident(e)
@@ -2538,7 +2561,7 @@ ext.box_reset = function()
     box.gimmicks, box.gimmicks_t = {}, 0
 end
 
-box_late = function(t_now)
+box.late = function(t_now)
     if not world_shared() or not cfg.box_sync or EVENT_MOVED == nil or t_now < box.next_scan then return end
     box.next_scan = t_now + 0.5
     local invs = box_inventories()
@@ -2595,10 +2618,18 @@ end
 local M_GUI_UPDATE = sdk.find_type_definition("app.GuiAutoSaveFlowController"):get_method("update")
 if M_GUI_UPDATE then
     sdk.hook(M_GUI_UPDATE, function()
-        local ok, err = pcall(box_late, now())
+        local ok, err = pcall(box.late, now())
         if not ok then say("item box error: %s", tostring(err)) end
         ok, err = pcall(gim.gui_tick)
         if not ok then say("gimmick error: %s", tostring(err)) end
+        if #ext.jobs > 0 then
+            local jobs = ext.jobs
+            ext.jobs = {}
+            for _, fn in ipairs(jobs) do
+                ok, err = pcall(fn)
+                if not ok then say("error: %s", tostring(err)) end
+            end
+        end
         if ext.life_gui then
             ok, err = pcall(ext.life_gui)
             if not ok then say("grab error: %s", tostring(err)) end
@@ -2638,7 +2669,7 @@ local function slot_of_serial(serial)
     local d = ssm and ssm:get_field("_SaveSlotInfoDict")
     local entries = d and d:get_field("_entries")
     local n = d and d:get_field("_count") or 0
-    for i, e in ipairs(entries and entries:get_elements() or {}) do
+    for i, e in ipairs(elements(entries)) do
         if i > n then break end
         local v = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
         local k = v and e:get_field("key")
@@ -2718,7 +2749,7 @@ saves.late = function(t_now)
     local p = saves.pending
     if p and can_save_now() then
         saves.pending = nil
-        make_save()
+        ext.later(make_save)
     elseif p and t_now - p.since > 300 then
         saves.pending = nil
         say("couldn't save with the host (no chance to in 5 minutes)")
@@ -3073,6 +3104,32 @@ local function tick_send(t_now)
     if ok and net then
         local n = net.send(data, false, CH_POSE)
         stats.tx, stats.tx_bytes = stats.tx + n, stats.tx_bytes + #data * n
+    end
+end
+
+-------------------------------------------------------------------------------------------------
+-- scene changes
+-------------------------------------------------------------------------------------------------
+-- Loading a save, the next chapter or a jump all go through LevelFlowManager.requestGameJump (loads
+-- also through SaveServiceManager.requestLoad). Right then every object of the old scene still
+-- exists: the puppets are destroyed, every index of scene objects (doors, items, gimmicks, triggers,
+-- enemies, item boxes) is dropped and the Lua wrappers are collected at once, and the old player
+-- object is left alone until the new one shows up. Holding them through the unload corrupted the
+-- game's memory (a crash a second later, in its lock-on scan).
+local function scene_leaving()
+    if me.go ~= nil then
+        me.leaving = { addr = me.go_addr, till = now() + 60 }
+        forget_player() -- on_player_lost: puppets destroyed, enemies / world / gimmicks / story / box reset
+    end
+    if ext.life then ext.life.hp, ext.life.hp_addr, ext.life.grab = nil, 0, nil end
+    ext.jobs = {} -- the partner's door pushes, pickups and story steps were for the old scene
+    collectgarbage("collect")
+end
+do
+    local function on_change() pcall(scene_leaving) end
+    sdk.hook(sdk.find_type_definition("app.LevelFlowManager"):get_method("requestGameJump"), on_change, nil)
+    for _, m in ipairs(sdk.find_type_definition("app.SaveServiceManager"):get_methods()) do
+        if m:get_name() == "requestLoad" then sdk.hook(m, on_change, nil) end
     end
 end
 

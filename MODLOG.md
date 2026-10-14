@@ -308,6 +308,53 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
 - Echo: a replay's own trigger chain isn't sent back (5 s per context), each trigger is sent once per
   10 s, and an already open lock isn't opened again.
 
+## v0.7.0 (2026-10-15) — downed / revive, grabs, personal pickups, chapter sweep
+
+- HitPoint: `get_NoDeath()` is an `app.ReferenceCountBoolRequestHolder` (`request(String label, Boolean)`,
+  `clear(String)`, `getResult()`): with a request on, 5000 damage left Grace at 1 HP, alive. Also
+  `set_Invincible`, `setNoDieCharacter`, `recovery(Int32, RecoveryFactor)` (nil factor works).
+- Player restrictions: `upd:get_RestrictBlackboardCore()._Unit (<Unit>k__BackingField)
+  :requestRestrictionAction(RestrictionType)`; consumed every frame (`_RequestRestriction` back to 0),
+  so request each pre-UpdateBehavior. RestrictionType: Walk 1 Run 2 Move 4 Terrain 8 Hold 16 DispHUD 32
+  InventoryOpen 64 Crouch 128 EquipmentWeapon 256 QuickTurn 512 CameraControl 1024 SwitchControl 2048
+  SwitchLight 4096 MeleeWepAttack 8192 Stumble 16384 Cover 32768. With 58335 W didn't move Grace.
+- Player status: `pc:get_Common()` (PlayerContextUnit_Common): IsCrouch, IsMeleeAttack, IsDamageAction...
+  Crouch key on PC: left Ctrl (VK 0xA2).
+- Grabs: `app.GrappleFsmController` (pooled component). `requestGrapple(GameObject[], UInt32)` /
+  `startGrapple(GameObject[])` with participants [cp_B000_06, cp_A100]; `get_IsPlaying()`;
+  `forceEndGrapple(false)` (from the GUI update) freed Grace at once, zombie unharmed. The player's
+  InteractTrigger "GrappleEscape..." flags don't move during a zombie grab.
+- Down flow verified: lethal hit -> HP 1 + down; a real zombie bite (800 -> 260 -> lethal) -> down, its
+  grab ended; revive -> 280/800; bleed out -> "Вы погибли" game over. Bug fixed: after dying the mod
+  re-entered "down" on the dead player (lethal hits keep coming while HP is 0).
+- Items: `ItemManager._ItemCatalog:getValue(ItemID, nil)` -> ItemDetailData `_ItemCategory`
+  (enum class; ToString): Ammo it40, Heal it00, Material it50, Weapon it10_0x/it10_2x, SubWeapon it20,
+  Armor it10_30, Attachment it30_00_1xx.., Charm, KeyItem it60, Map/Flag/Storage/Other it99, Procedure
+  it70. 181 ItemCores in Chap3_02 all resolve.
+- Chapters (natives/stm/gameassets/content/maingame/scene/*.scn): chap1_00 1_01 1_10, chap3_01 3_02 3_03
+  3_0304 3_04 3_05 3_06 3_10 3_20 3_324 3_40, chap4_00 4_10 4_1020 4_20 4_30 4_40 4_4050 4_50, chap5_02
+  5_03 5_04 5_05 5_10, ff_01 ff_02. Chap1_10 is Leon (cp_A000, 84 joints): his echo puppet builds (9
+  parts) and holds his gun.
+- Title screen: left idle it plays the opening (FBI office) in-engine; Esc opens the cutscene menu,
+  holding F skips. Driving the title needs a screenshot first.
+- Crash during the first sweep (jump Chap1_01 -> Chap1_10, same LockOnTargetDriver stack as the
+  inventory crashes) while several dev hooks (fake partner reading the stale player object every
+  frame, zombie test hooks) were installed; a clean jump Chap1_10 -> Chap3_01 with the echo puppet on
+  went fine.
+
+- SCENE JUMPS CRASH OUTSIDE THE GUI UPDATE: `setOverrideNextJumpScene` + `requestGameJump` issued from
+  REFramework callbacks (pre UpdateBehavior via the bridge) crashed 1-5 s later in 3 of ~6 jumps
+  (LockOnTargetDriver scan / runtime, same as the inventory crashes). The same jump run inside the
+  `GuiAutoSaveFlowController.update` hook: 17 chapter jumps in a row, no crash. The game itself calls
+  `LevelFlowManager.requestGameJump` for every move into a game scene (loading a save, the next chapter).
+  So the mod now queues everything that changes the world (`ext.later`: chapter jumps for following
+  the host, story steps, door pushes, pickups, the guest's save) and runs the queue in the GUI update;
+  on `requestGameJump` / `requestLoad` it drops all scene-object indexes and puppets and collects.
+- Chapter jumps to Chap5_03 / Chap5_04 straight from Chap5_02 left a black screen (no player, game
+  alive): not every chapter can be jumped into out of order.
+- `scene:findComponents` / `go:get_Components` sometimes return something that isn't an array:
+  `elements(arr)` (pcall'd get_elements) everywhere.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

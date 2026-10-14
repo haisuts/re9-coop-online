@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.6.1
+# RE9 Co-op (online) — v0.7.0
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -21,6 +21,16 @@ from it is used.
   into puzzle slots count for both; switch positions and other gimmick states follow as soon as the
   partner is near them. Gimmicks in areas the partner hasn't loaded take the state when they load.
 - **Cutscenes**: the partner is hidden while either of you is in one.
+- **Downed, not dead**: while your partner is with you, a hit that would kill you leaves you on your
+  last breath instead — you can't move or shoot, enemies can't hurt you more — and your partner gets
+  you up by crouching next to you for 2.5 s (you come back with a third of your health). If nobody
+  comes within 90 s, your partner leaves, or you both go down, it's game over as usual.
+- **Grabs**: when an enemy grabs you, your partner frees you by shooting that enemy or hitting it
+  (knife, kick) next to you; the grab ends at once.
+- **Weapons and key items for both**: a weapon, key item, file, map or upgrade one player picks up stays
+  in the world for the other to pick up their own copy. Ammo, healing items and crafting materials are
+  shared (whoever takes them first) — or each player's own with "Ammo, healing and materials: each
+  player picks up their own".
 - **One item box for both**: what one player puts in the item box, the other finds in theirs and can
   take out (guns keep their loaded ammo).
 - **Saving together**: whenever the host's game saves (autosave or typewriter), the guest's game makes
@@ -52,6 +62,15 @@ from it is used.
   рядом с ними. То, что у напарника ещё не загружено, применится при загрузке участка.
 - **Катсцены:** пока у кого-то из вас катсцена, напарник скрыт и не мешает.
 - **Убитые враги:** враг, убитый одним игроком, мёртв и в игре второго (не «живой труп»).
+- **Без сознания вместо смерти:** пока напарник рядом (та же глава, на связи), смертельный удар
+  оставляет вас «при смерти»: двигаться и стрелять нельзя, враги больше не ранят. Напарник
+  **приседает рядом с вами 2,5 секунды** — вы встаёте с третью здоровья. Если за 90 секунд никто не
+  помог, напарник отключился или без сознания оба — обычный экран смерти.
+- **Захват:** если вас схватил враг, напарник освобождает вас, **выстрелив в этого врага или ударив
+  его ножом/пинком рядом с вами** — захват сразу прерывается.
+- **Оружие и ключевые предметы — каждому:** оружие, ключевые предметы, файлы, карты, улучшения,
+  подобранные одним, остаются в мире для второго — он берёт свой экземпляр. Патроны, лечение и
+  материалы для крафта — общие (кто первый взял); в меню можно включить «каждому свои».
 - **Общий ящик предметов:** положили вещь в ящик — она появляется в ящике у напарника, и он может её
   забрать (и наоборот). Оружие переносится вместе с заряженными патронами. Пока ящик у вас открыт,
   изменения от напарника ждут, пока вы его закроете.
@@ -157,6 +176,8 @@ from it is used.
 ## Known limitations
 - Both players need the same chapter loaded; the partner is hidden while you're in different areas.
 - If both players take the same thing out of the item box at the same moment, both get it.
+- After a game over each game goes back to its own last checkpoint; use "Go to partner's chapter" /
+  "Teleport to partner" to meet up again.
 - The guest's co-op save is an autosave: it takes the place of the guest's oldest autosave, like the
   game's own autosaves do.
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
