@@ -73,7 +73,8 @@ from it is used.
   материалы для крафта — общие (кто первый взял); в меню можно включить «каждому свои».
 - **Общий ящик предметов:** положили вещь в ящик — она появляется в ящике у напарника, и он может её
   забрать (и наоборот). Оружие переносится вместе с заряженными патронами. Пока ящик у вас открыт,
-  изменения от напарника ждут, пока вы его закроете.
+  изменения от напарника ждут, пока вы его закроете. Передаётся только то, что игрок сам сделал в
+  ящике (стартовые наборы, которые игра кладёт в ящики в начале глав, у каждого свои — без дублей).
 - **Совместное сохранение:** когда сохраняется игра хоста (автосейв или печатная машинка), игра гостя
   тут же делает автосейв (в слот автосохранения — ручные слоты гостя не трогаются). Если сохранить
   сейчас нельзя (катсцена, загрузка, бой, где игра запрещает сохранение), гость сохранится, как только
@@ -126,6 +127,17 @@ from it is used.
 `reframework/data/re9coop_config.json`.
 
 ---
+
+## Tested
+With one PC (self-test echo + simulated partner messages), 2026-10-15:
+- Every chapter scene that can be loaded directly: Chap1_01, 1_10, 3_01, 3_02, 3_0304, 3_04, 3_05,
+  3_06, 3_10, 3_20, 3_324, 3_40, 4_1020, 4_20, 4_30, 4_4050, 5_02, 5_10 (Grace and Leon): the
+  partner's character builds, doors, items, gimmicks, triggers and enemies are found, no mod errors,
+  no crash over ~30 chapter changes. Chap5_03 / 5_04 / 5_05 and the ff scenes are only entered through
+  the story, so they weren't loaded directly.
+- Downed (a real zombie bite), revive, bleed-out game over; grab freed by the partner's hit and by
+  their melee; the item box through the game's own box screen; key-locked gate opened for the partner.
+- Not yet: a real two-PC session, boss fights.
 
 ## How it works
 - `re9coop_net.dll` (REFramework plugin, C++): uses the game's own `steam_api64.dll` — a friends-only

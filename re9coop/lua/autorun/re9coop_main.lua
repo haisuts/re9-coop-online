@@ -2354,6 +2354,9 @@ end
 -- has a box open: then it waits until they close it. Operations never lose an item: if both players
 -- take the same thing at the same moment, both get it. On joining, the lobby owner sends its boxes;
 -- the guest's game puts in what it lacks and sends back what the owner lacks.
+-- Only changes made while the player uses an item box are sent (its GmItemBoxV2 isn't idle, or the
+-- box screen's GuiItemBoxModel is at work): the game also fills boxes itself when a chapter starts,
+-- and both games do that on their own.
 local box
 do
 local BOX_BOARDS = { [1] = true, [2] = true } -- app.InventoryType: ItemBox, ShareItemBox
@@ -2515,6 +2518,13 @@ local function diff_ops(old, list, counts)
     return ops
 end
 
+-- the box screen at work
+for _, m in ipairs(sdk.find_type_definition("app.GuiItemBoxModel"):get_methods()) do
+    if ({ setup = 1, canStore = 1, collectHasItem = 1, makeItemData = 1 })[m:get_name()] then
+        sdk.hook(m, function() box.used_t = now() end, nil)
+    end
+end
+
 -- true while one of the item boxes here is in use (its menu may be open)
 local function box_in_use(t_now)
     if t_now >= box.gimmicks_t or box.gimmicks_chapter ~= me.chapter then
@@ -2523,7 +2533,10 @@ local function box_in_use(t_now)
     end
     for _, g in ipairs(box.gimmicks) do
         local ok, idle = pcall(g.call, g, "get_IsStepTypeNone")
-        if ok and idle == false then return true end
+        if ok and idle == false then
+            box.used_t = t_now
+            return true
+        end
     end
     return false
 end
@@ -2559,18 +2572,21 @@ end
 
 ext.box_reset = function()
     box.gimmicks, box.gimmicks_t = {}, 0
+    box.known = {} -- the next scene starts from what its boxes hold
 end
 
 box.late = function(t_now)
     if not world_shared() or not cfg.box_sync or EVENT_MOVED == nil or t_now < box.next_scan then return end
     box.next_scan = t_now + 0.5
     local invs = box_inventories()
-    -- our own changes first, so the partner's below aren't taken for ours
+    -- our own changes first, so the partner's below aren't taken for ours (sent only when the player
+    -- used a box just now)
+    local in_use = box_in_use(t_now) or t_now - (box.used_t or -10) < 3
     for key, inv in pairs(invs) do
         local list, counts = read_box(inv)
         local old = box.known[key]
         box.known[key] = counts
-        if old then
+        if old and in_use then
             local ops = diff_ops(old, list, counts)
             if #ops > 0 then
                 send_ctrl(pack_box(key, FLAG_OPS, ops))
@@ -2579,7 +2595,7 @@ box.late = function(t_now)
         end
     end
     -- the partner's, when no box is open here
-    if #box.queue > 0 and not box_in_use(t_now) then
+    if #box.queue > 0 and not box_in_use(t_now) and t_now - (box.used_t or -10) > 0.5 then
         local queue = box.queue
         box.queue = {}
         for _, m in ipairs(queue) do

@@ -354,6 +354,15 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
   alive): not every chapter can be jumped into out of order.
 - `scene:findComponents` / `go:get_Components` sometimes return something that isn't an array:
   `elements(arr)` (pcall'd get_elements) everywhere.
+- Item box screen: firing the box's own "Interact" trigger (KeyInputHolder on Gm15_003) opens the
+  real box screen (and a first-use tutorial). While it is open: `GmItemBoxV2._StepType` = 3 and
+  `GuiItemBoxModel.setup / canStore / collectHasItem` run. Tab ("Положить") stored the medical injector
+  into User00/1 (Grace's ItemBox); the mod saw and sent it. A partner op that arrived meanwhile waited
+  and was applied after closing; our addPanel'ed ammo shows in the real box screen. Side effect: the
+  Steam achievement "С глаз долой" (store an item as Grace) unlocked on the user's account.
+- Chapter starts fill boxes on their own (21 box changes over the sweep): only changes made while a box
+  is in use (step not None, or the box screen within 3 s) are sent now; box.known resets on scene
+  change. Two chapter jumps after that: nothing sent.
 
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
