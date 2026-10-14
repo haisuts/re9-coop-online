@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.5.0
+# RE9 Co-op (online) — v0.6.0
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -9,7 +9,8 @@ from it is used.
   play, the gun in their hands, a name tag with the ping, their muzzle flash, gun sounds and
   flashlight.
 - **Shared enemies**: each enemy is run by the player it's closest to, so enemies hunt, grab and hurt
-  both of you. The other player sees the same enemy pose for pose; their hits on it count.
+  both of you. The other player sees the same enemy pose for pose; their hits on it count, and an enemy
+  killed by one player is dead in the other's game too.
 - **Shared doors and pickups**: a door your partner pushes open opens in your game too; an item your
   partner picks up disappears from yours.
 - **Story steps (experimental)**: every level-flow step either of you takes is taken by the other
@@ -18,10 +19,17 @@ from it is used.
 - **Locks, puzzles, switches**: their state goes to the partner and takes effect when that area loads
   in the partner's game.
 - **Cutscenes**: the partner is hidden while either of you is in one.
+- **One item box for both**: what one player puts in the item box, the other finds in theirs and can
+  take out (guns keep their loaded ammo).
+- **Saving together**: whenever the host's game saves (autosave or typewriter), the guest's game makes
+  an autosave too. To go on later: both load their latest save, the host hosts, the guest joins — the
+  host's progress (story, locks, puzzles, box) is sent on joining and the guest follows the host's
+  chapter.
 - **Teleport to partner**, partner health in the name tag, public lobbies and a "Copy lobby ID" button.
 
-**Not shared:** inventories (each keeps their own). A key used or a lever pulled by one player shows up
-for the other only after that area reloads (running gimmicks follow their own state).
+**Not shared:** what you carry (each keeps their own inventory, saved in their own save). A key used or
+a lever pulled by one player shows up for the other only after that area reloads (running gimmicks
+follow their own state).
 
 ---
 
@@ -41,6 +49,22 @@ for the other only after that area reloads (running gimmicks follow their own st
 - **Замки, загадки, переключатели:** их состояние передаётся напарнику и применяется, когда этот
   участок у него загрузится (см. ограничения).
 - **Катсцены:** пока у кого-то из вас катсцена, напарник скрыт и не мешает.
+- **Убитые враги:** враг, убитый одним игроком, мёртв и в игре второго (не «живой труп»).
+- **Общий ящик предметов:** положили вещь в ящик — она появляется в ящике у напарника, и он может её
+  забрать (и наоборот). Оружие переносится вместе с заряженными патронами. Пока ящик у вас открыт,
+  изменения от напарника ждут, пока вы его закроете.
+- **Совместное сохранение:** когда сохраняется игра хоста (автосейв или печатная машинка), игра гостя
+  тут же делает автосейв (в слот автосохранения — ручные слоты гостя не трогаются). Если сохранить
+  сейчас нельзя (катсцена, загрузка, бой, где игра запрещает сохранение), гость сохранится, как только
+  станет можно.
+
+### Как продолжить прохождение в другой день
+1. Оба запускают игру и выбирают **«Продолжить»** (последнее сохранение — у гостя это совместный
+   автосейв).
+2. Хост создаёт сессию, гость подключается (см. ниже).
+3. При подключении хост сам отправляет гостю прогресс главы (сюжет, замки, загадки) и содержимое
+   ящика; если гость в другой главе — через 5 секунд он перейдёт к хосту. Инвентарь у каждого свой —
+   тот, с которым он сохранился.
 
 ### Установка (оба игрока)
 1. **REFramework**: скачайте `REFramework.zip` (текущая ночная сборка) с
@@ -108,14 +132,25 @@ for the other only after that area reloads (running gimmicks follow their own st
   `requestChangeProgressiveNumber`. Chapter jumps use `MainGameFlowManager.setOverrideNextJumpScene` +
   `LevelFlowManager.requestGameJump`.
 
+- Item box: both games' item boxes (`app.Inventory`, board types ItemBox / ShareItemBox) are read
+  twice a second; what changed goes to the partner as "+item" / "-item" operations, applied with
+  `addPanel` + `reloadDirect` / `removePanel`. Inventories are changed only inside the game's GUI update
+  (where the game's own item box moves items); changing them from REFramework's frame callbacks
+  crashed the game on a worker thread. On joining, the boxes are merged (nothing is lost).
+- Saves: the host's save is noticed by `SaveServiceManager`'s serial number moving to a game slot; the
+  guest then runs `GuiManager.AutoSaveFlow.requestAutoSave` with the game's default settings (Auto
+  slot, empty or oldest).
+
 ## Roadmap
-1. Live sharing of key items, levers and puzzles that are running (per gimmick kind, like door pushes).
+1. Live sharing of key items, levers and puzzles that are running. A lock (`GmLockV2`) knows it is
+   unlocked once its data says so, but only the game's key-use scene switches its running state.
 2. Leon as the partner in Grace's chapters (and the reverse), downed/revive.
 
 ## Known limitations
 - Both players need the same chapter loaded; the partner is hidden while you're in different areas.
-- On the non-runner side, a dead enemy shows its death, but that game still counts it as alive (aim
-  assist may still pick it).
+- If both players take the same thing out of the item box at the same moment, both get it.
+- The guest's co-op save is an autosave: it takes the place of the guest's oldest autosave, like the
+  game's own autosaves do.
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Items dropped at runtime (e.g. by enemies) aren't shared.
 - A key, lever or puzzle used by one player takes effect for the other only once that area reloads.

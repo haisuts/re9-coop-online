@@ -1,25 +1,23 @@
--- RE9 Co-op: online co-op for Resident Evil Requiem over Steam   (v0.3.0)
+-- RE9 Co-op: online co-op for Resident Evil Requiem over Steam
 --
 -- Your Steam friend appears in your game as a fully posed character (their own costume, every move
--- they make, their gun, its muzzle flash and sounds), and you appear in theirs. The host's enemies
--- are shared: the guest's game shows the same enemies doing what they do on the host, and the guest's
--- shots hurt them on the host. Steam lobby + peer-to-peer through Steam's relay network.
+-- they make, their gun, its muzzle flash, sounds and flashlight), and you appear in theirs. Enemies,
+-- doors, pickups, gimmick states, story steps and chapters are shared, the item box is one box for
+-- both, and the guest's game saves when the host's does. Steam lobby + peer-to-peer through Steam's
+-- relay network.
 --
 -- Needs REFramework and reframework/plugins/re9coop_net.dll (the Steam part).
 -- Menu: REFramework (Insert) -> Script Generated UI -> "RE9 Co-op (online)".
 --
--- How it works:
+-- How it works: each section below starts with its own notes.
 -- * Players: each game reads its own player's skeleton (68 joints) after animation and sends it 20
 --   times a second (~600 bytes). The other game builds a "puppet" from the same montage parts and
 --   skeleton file and plays the pose back through a small buffer.
--- * Enemies (host = lobby owner): the host sends every spawned enemy's state 15 times a second (the
---   nearest few with their full skeleton). On the guest each enemy is spawned through its own spawn
---   control, its AI (think + lock-on drivers) is switched off, and it is warped and posed from the
---   host's data. Damage the guest deals (HitPoint.addDamageHitPoint / addDamageReactionHP) is caught
---   before it lands and sent to the host, which applies it to the real enemy.
+-- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
+--   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.5.0"
-local PROTO = 4
+local VERSION = "0.6.0"
+local PROTO = 5
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -46,6 +44,8 @@ local cfg = {
     gimmick_sync = true,      -- share gimmick states (locks, puzzles, switches, used keys)
     story_sync = true,        -- share story progress (level flow steps); experimental
     follow_host = true,       -- the guest goes to the host's chapter
+    box_sync = true,          -- one item box for both players
+    save_with_host = true,    -- the guest's game autosaves whenever the host's game saves
     public_lobby = false,     -- anyone with the lobby ID can join (otherwise friends and invitees)
 }
 
@@ -296,6 +296,7 @@ local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
 local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
+local MSG_BOX, MSG_SAVE = 22, 23
 local FLAG_CUTSCENE = 64
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
@@ -683,6 +684,7 @@ local enemy_ctrl, enemy_recv, enemies_reset -- set in the "shared enemies" secti
 local world_ctrl, world_reset -- set in the "shared doors and pickups" section
 local gimmick_ctrl, gimmick_reset -- set in the "shared gimmick states" section
 local story_ctrl, story_reset, go_to_partner_chapter -- set in the "story" section
+local box_ctrl, box_reset, saves_ctrl -- set in the "item box" and "saving together" sections
 local loopback = false
 local stats = { tx = 0, rx = 0, tx_bytes = 0, rx_bytes = 0, rate_t = 0, tx_kbps = 0, rx_kbps = 0 }
 
@@ -751,6 +753,7 @@ on_player_lost = function()
     if world_reset then world_reset() end
     if gimmick_reset then gimmick_reset() end
     if story_reset then story_reset() end
+    if box_reset then box_reset() end
 end
 
 local function send_ctrl(data, to)
@@ -806,6 +809,10 @@ local function on_ctrl(from, data)
         gimmick_ctrl(from, kind, data)
     elseif kind == MSG_STORY and story_ctrl then
         story_ctrl(from, kind, data)
+    elseif kind == MSG_BOX and box_ctrl then
+        box_ctrl(from, kind, data)
+    elseif kind == MSG_SAVE and saves_ctrl then
+        saves_ctrl(from, kind, data)
     end
 end
 
@@ -1369,7 +1376,18 @@ local function enemies_tick(t_now)
     for id, st in pairs(foes.states) do
         local e = foes.index[id]
         local fresh = t_now - st.last < 1.0 and st.chapter == me.chapter
-        if e and foes.owner[id] == false then
+        -- the owner's enemy died: ours dies too (its AI back, lethal damage the game's own way), so
+        -- this game counts it as dead and plays the death itself
+        if e and foes.owner[id] == false and st.flags & F_DEAD ~= 0 and not st.killed then
+            st.killed = true
+            if foes.puppets[id] then release_puppet(id, true) end
+            if e.ctx:call("get_IsSpawn") and not e.ctx:call("get_IsDead") then
+                local hp = e.ctx:call("get_HitPoint")
+                local cur = hp and hp:call("get_CurrentHitPoint") or 0
+                apply_damage(e, 0, math.max(1, cur) + 100, false, true)
+            end
+        end
+        if e and foes.owner[id] == false and not st.killed then
             local pup = foes.puppets[id]
             local spawned = e.ctx:call("get_IsSpawn")
             if pup and not spawned then -- put to sleep anyway: let go, it gets respawned below
@@ -1397,7 +1415,7 @@ local function enemies_tick(t_now)
         local considered = foes.test == nil or id == foes.test.dst
         if considered and e.ctx:call("get_IsSpawn") then
             if foes.owner[id] == nil and foes.test == nil then foes.owner[id] = true end
-            if foes.owner[id] == false then
+            if foes.owner[id] == false and not e.ctx:call("get_IsDead") then
                 if foes.puppets[id] == nil then puppetize(id, e) end
                 local st = foes.states[id]
                 if st == nil or t_now - st.last > 3 then
@@ -1559,7 +1577,9 @@ local function scene_components(type_obj)
     local sm = sdk.get_native_singleton("via.SceneManager")
     local scene = sm and sdk.call_native_func(sm, T_SCENE_MANAGER, "get_CurrentScene")
     local arr = scene and scene:call("findComponents(System.Type)", type_obj)
-    return arr and arr:get_elements() or {}
+    -- now and then the call hands back something that isn't an array
+    local ok, list = pcall(function() return arr and arr:get_elements() end)
+    return ok and list or {}
 end
 
 local function id_string(holder)
@@ -1585,6 +1605,7 @@ end
 
 world_shared = function()
     if me.go == nil or not cfg.world_sync then return false end
+    if _G.re9coop_test_shared then return true end -- dev bridge only
     if loopback then return true end
     local st_net = session.status
     return st_net ~= nil and st_net.state == "in_lobby" and session.last_members ~= ""
@@ -2044,7 +2065,13 @@ local function chapter_jump_name(folder, tries)
     return folder:match("^(Chap%d+_%d%d)%d%d$") or folder
 end
 
+-- "Chap3_03" and "Chap3_0304" (the folder a player was made in) are the same chapter
+local function same_chapter(a, b)
+    return a == b or (a:match("^(Chap%d+_%d%d)") or a) == (b:match("^(Chap%d+_%d%d)") or b)
+end
+
 local function host_peer()
+    if _G.re9coop_test_host then return _G.re9coop_test_host end -- dev bridge only
     local st_net = session.status
     return st_net and st_net.owner ~= st_net.me and peers[st_net.owner] or nil
 end
@@ -2068,7 +2095,7 @@ story_reset = function()
 end
 
 story_late = function(t_now)
-    if not world_shared() then return end
+    if not world_shared() and not _G.re9coop_test_host then return end
     local st_net = session.status
     -- the lobby owner sends every flow that has moved, once per partner per chapter
     local partner = partner_to_follow and partner_to_follow()
@@ -2094,7 +2121,7 @@ story_late = function(t_now)
     -- follow the host into its chapter
     local hp = host_peer()
     local f = story.follow
-    if cfg.follow_host and hp and hp.chapter ~= "" and me.chapter ~= "" and hp.chapter ~= me.chapter
+    if cfg.follow_host and hp and hp.chapter ~= "" and me.chapter ~= "" and not same_chapter(hp.chapter, me.chapter)
         and #hp.snaps > 0 and t_now - hp.last < 3 and not in_cutscene() then
         if f.target ~= hp.chapter then
             f.target, f.at, f.tries = hp.chapter, t_now + 5, 0
@@ -2104,10 +2131,422 @@ story_late = function(t_now)
             f.tries = f.tries + 1
             f.at = t_now + 25 -- if we're still not there by then, try the other name
         end
-    elseif f.target and (hp == nil or hp.chapter == me.chapter) then
+    elseif f.target and (hp == nil or same_chapter(hp.chapter, me.chapter)) then
         f.target = nil
     end
 end
+end
+
+-------------------------------------------------------------------------------------------------
+-- shared item box
+-------------------------------------------------------------------------------------------------
+-- The item boxes (app.Inventory of board type ItemBox or ShareItemBox, a 1 x 100 list) hold the same
+-- things in both games, so what one player puts in, the other can take out. Twice a second each box
+-- is read (getPanelStates: item, count, loaded ammo) and what changed since the last look goes to
+-- the partner as operations: "+panel" (put in) and "-panel" (taken out). The partner's game does the
+-- same to its box (addPanel + reloadDirect for a gun's ammo, removePanel), but not while that player
+-- has a box open: then it waits until they close it. Operations never lose an item: if both players
+-- take the same thing at the same moment, both get it. On joining, the lobby owner sends its boxes;
+-- the guest's game puts in what it lacks and sends back what the owner lacks.
+local box, box_late
+do
+local BOX_BOARDS = { [1] = true, [2] = true } -- app.InventoryType: ItemBox, ShareItemBox
+local SIG_ADD = "addPanel(app.ItemID, System.Int32, via.Int2, app.InventoryPanelRotateType, app.ItemStockChangedEventType)"
+local SIG_CAN_ADD = "canAddPanel(app.ItemID, System.Int32, via.Int2, app.InventoryPanelRotateType)"
+local SIG_REMOVE = "removePanel(app.Inventory.PanelKey, app.ItemStockChangedEventType)"
+local SIG_RELOAD = "reloadDirect(app.Inventory.PanelKey, System.Int32, app.ItemID)"
+local T_ITEM_ID = sdk.find_type_definition("app.ItemID")
+local T_INT2 = sdk.find_type_definition("via.Int2")
+local T_SCENE_MANAGER = sdk.find_type_definition("via.SceneManager")
+local TYPE_BOX_GIMMICK = sdk.typeof("app.GmItemBoxV2")
+local FLAG_OPS, FLAG_JOIN = 0, 1
+-- the stock event our box changes carry: "moved", as when the game's box moves an item
+local EVENT_MOVED = sdk.find_type_definition("app.ItemStockChangedEventType"):get_field("Moved"):get_data(nil)
+if EVENT_MOVED then EVENT_MOVED:add_ref_permanent() end
+
+box = {
+    known = {},         -- box key ("User00/1") -> { panel -> count } as we last saw it
+    queue = {},         -- { {key, ops}, ... } from the partner, waiting for our box to be closed
+    next_scan = 0,
+    gimmicks = {}, gimmicks_t = 0, gimmicks_chapter = "",
+    full_done_for = nil,
+    stats = { sent = 0, applied = 0 },
+}
+
+local function box_inventories()
+    local m = sdk.get_managed_singleton("app.InventoryManager")
+    local d = m and m:get_field("_Inventories")
+    local entries = d and d:get_field("_entries")
+    local n = d and d:get_field("_count") or 0
+    local out = {}
+    if entries == nil then return out end
+    for i, e in ipairs(entries:get_elements()) do
+        if i > n then break end
+        local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
+        local k = inv and inv:get_field("_InventoryKey")
+        local board = k and k:get_field("_BoardType")
+        local user = k and k:get_field("_User")
+        if board and BOX_BOARDS[board] and user and not k:get_field("_IsTemporal") then
+            local ok, uname = pcall(user.call, user, "ToString")
+            if ok and uname then out[uname .. "/" .. board] = inv end
+        end
+    end
+    return out
+end
+
+-- A panel as "item|count|rotation|ammo:count,...@x,y": the part before "@" is what panels are matched
+-- by (a box may move its panels around), the slot is only where we try to put it.
+local function panel_entry(st)
+    local id = st:call("get_ItemID")
+    local name = id and id:get_field("_Name")
+    if not name then return nil end
+    local loads = {}
+    local li = st:call("get_LoadingItems")
+    for _, c in ipairs(li and li:get_elements() or {}) do
+        local ad = c:get_field("_AmountData")
+        local an, as = ad and ad:get_field("_ItemID"), ad and ad:get_field("_Stock")
+        if an and as and as > 0 then loads[#loads + 1] = an .. ":" .. as end
+    end
+    local p = st:call("get_Position")
+    return string.format("%s|%d|%d|%s@%d,%d", name, st:call("get_Stock") or 0, st:call("get_RotateType") or 0,
+        table.concat(loads, ","), p and p.x or 0, p and p.y or 0)
+end
+
+local function ident(e) return e:match("^[^@]*") end
+
+-- { {e = entry, id = ident, key = PanelKey}, ... } and { ident -> count }
+local function read_box(inv)
+    local list, counts = {}, {}
+    local sts = inv:call("getPanelStates")
+    for _, st in ipairs(sts and sts:get_elements() or {}) do
+        local e = panel_entry(st)
+        if e then
+            local id = ident(e)
+            list[#list + 1] = { e = e, id = id, key = st:call("get_Key") }
+            counts[id] = (counts[id] or 0) + 1
+        end
+    end
+    return list, counts
+end
+
+local function pack_box(key, flag, ops)
+    local t = { string.pack("<Bs1BH", MSG_BOX, key, flag, #ops) }
+    for _, op in ipairs(ops) do t[#t + 1] = string.pack("<s2", op) end
+    return table.concat(t)
+end
+
+local function item_id(name)
+    local f = T_ITEM_ID:get_field(name)
+    if f == nil then return nil end
+    local ok, v = pcall(f.get_data, f, nil)
+    return ok and v or nil
+end
+
+local function int2(x, y)
+    local v = ValueType.new(T_INT2)
+    v.x, v.y = x, y
+    return v
+end
+
+-- where a panel can go: its own slot if free, else the first free one
+local function free_slot(inv, id, stock, rot, x, y)
+    local ok, can = pcall(inv.call, inv, SIG_CAN_ADD, id, stock, int2(x, y), rot)
+    if ok and can then return int2(x, y) end
+    local size = inv:get_field("_UnlockSlotSize")
+    for yy = 0, (size and size.y or 100) - 1 do
+        for xx = 0, (size and size.x or 1) - 1 do
+            ok, can = pcall(inv.call, inv, SIG_CAN_ADD, id, stock, int2(xx, yy), rot)
+            if ok and can then return int2(xx, yy) end
+        end
+    end
+    return nil
+end
+
+local function add_entry(inv, e)
+    local name, stock, rot, loads, x, y = e:match("^([^|]+)|(-?%d+)|(%d+)|([^@]*)@(-?%d+),(-?%d+)$")
+    local id = name and item_id(name)
+    if id == nil then return false end
+    stock, rot = tonumber(stock), tonumber(rot)
+    local pos = free_slot(inv, id, stock, rot, tonumber(x), tonumber(y))
+    if pos == nil then return false end
+    local ok, key = pcall(inv.call, inv, SIG_ADD, id, stock, pos, rot, EVENT_MOVED)
+    if not ok or key == nil then return false end
+    for an, as in loads:gmatch("([^:,]+):(%d+)") do
+        local aid = item_id(an)
+        if aid then pcall(inv.call, inv, SIG_RELOAD, key, tonumber(as), aid) end
+    end
+    return true
+end
+
+local function apply_ops(inv, ops)
+    local list = read_box(inv)
+    for _, op in ipairs(ops) do
+        local sign, body = op:sub(1, 1), op:sub(2)
+        if sign == "-" then
+            for i, x in ipairs(list) do
+                if x.id == body then
+                    pcall(inv.call, inv, SIG_REMOVE, x.key, EVENT_MOVED)
+                    table.remove(list, i)
+                    break
+                end
+            end
+        elseif sign == "+" and not add_entry(inv, body) then
+            say("couldn't put %s in the box", body:match("^[^|]*"))
+        end
+    end
+    box.stats.applied = box.stats.applied + 1
+end
+
+-- what changed in a box since we last looked, as operations
+local function diff_ops(old, list, counts)
+    local ops, seen = {}, {}
+    for _, x in ipairs(list) do
+        seen[x.id] = (seen[x.id] or 0) + 1
+        if seen[x.id] > (old[x.id] or 0) then ops[#ops + 1] = "+" .. x.e end
+    end
+    for id, c in pairs(old) do
+        for _ = (counts[id] or 0) + 1, c do ops[#ops + 1] = "-" .. id end
+    end
+    return ops
+end
+
+local function scene_components(type_obj)
+    local sm = sdk.get_native_singleton("via.SceneManager")
+    local scene = sm and sdk.call_native_func(sm, T_SCENE_MANAGER, "get_CurrentScene")
+    local arr = scene and scene:call("findComponents(System.Type)", type_obj)
+    -- now and then the call hands back something that isn't an array
+    local ok, list = pcall(function() return arr and arr:get_elements() end)
+    return ok and list or {}
+end
+
+-- true while one of the item boxes here is in use (its menu may be open)
+local function box_in_use(t_now)
+    if t_now >= box.gimmicks_t or box.gimmicks_chapter ~= me.chapter then
+        box.gimmicks_t, box.gimmicks_chapter = t_now + 5, me.chapter
+        box.gimmicks = scene_components(TYPE_BOX_GIMMICK)
+    end
+    for _, g in ipairs(box.gimmicks) do
+        local ok, idle = pcall(g.call, g, "get_IsStepTypeNone")
+        if ok and idle == false then return true end
+    end
+    return false
+end
+
+-- the lobby owner's box as we join: put in what we lack, send back what it lacks
+local function join_merge(key, inv, entries, from)
+    local list, counts = read_box(inv)
+    local mine, ops_here, ops_there = {}, {}, {}
+    for id, c in pairs(counts) do mine[id] = c end
+    for _, e in ipairs(entries) do
+        local id = ident(e)
+        if (mine[id] or 0) > 0 then mine[id] = mine[id] - 1 else ops_here[#ops_here + 1] = "+" .. e end
+    end
+    for _, x in ipairs(list) do
+        if (mine[x.id] or 0) > 0 then
+            mine[x.id] = mine[x.id] - 1
+            ops_there[#ops_there + 1] = "+" .. x.e
+        end
+    end
+    if #ops_here > 0 then apply_ops(inv, ops_here) end
+    if #ops_there > 0 then send_ctrl(pack_box(key, FLAG_OPS, ops_there), from) end
+    say("item box %s: got %d, sent %d", key, #ops_here, #ops_there)
+end
+
+box_ctrl = function(from, kind, data)
+    -- our own echo (self test) would put everything in twice
+    if from == LOOPBACK_ID or not world_shared() or not cfg.box_sync then return end
+    local _, key, flag, n, pos = string.unpack("<Bs1BH", data)
+    local ops = {}
+    for i = 1, n do ops[i], pos = string.unpack("<s2", data, pos) end
+    if #box.queue < 256 then box.queue[#box.queue + 1] = { key = key, flag = flag, ops = ops, from = from } end
+end
+
+box_reset = function()
+    box.gimmicks, box.gimmicks_t = {}, 0
+end
+
+box_late = function(t_now)
+    if not world_shared() or not cfg.box_sync or EVENT_MOVED == nil or t_now < box.next_scan then return end
+    box.next_scan = t_now + 0.5
+    local invs = box_inventories()
+    -- our own changes first, so the partner's below aren't taken for ours
+    for key, inv in pairs(invs) do
+        local list, counts = read_box(inv)
+        local old = box.known[key]
+        box.known[key] = counts
+        if old then
+            local ops = diff_ops(old, list, counts)
+            if #ops > 0 then
+                send_ctrl(pack_box(key, FLAG_OPS, ops))
+                box.stats.sent = box.stats.sent + 1
+            end
+        end
+    end
+    -- the partner's, when no box is open here
+    if #box.queue > 0 and not box_in_use(t_now) then
+        local queue = box.queue
+        box.queue = {}
+        for _, m in ipairs(queue) do
+            local inv = invs[m.key]
+            if inv then
+                local ok, err
+                if m.flag == FLAG_JOIN then
+                    ok, err = pcall(join_merge, m.key, inv, m.ops, m.from)
+                else
+                    ok, err = pcall(apply_ops, inv, m.ops)
+                end
+                if not ok then say("box error: %s", tostring(err)) end
+                local _, counts = read_box(inv)
+                box.known[m.key] = counts
+            end
+        end
+    end
+    -- the lobby owner sends its boxes once to a partner who joins
+    local st_net = session.status
+    local partner = partner_to_follow and partner_to_follow()
+    if st_net and st_net.is_host and partner and partner.id ~= LOOPBACK_ID and box.full_done_for ~= partner.id then
+        box.full_done_for = partner.id
+        for key, inv in pairs(invs) do
+            local entries = {}
+            for _, x in ipairs((read_box(inv))) do entries[#entries + 1] = x.e end
+            send_ctrl(pack_box(key, FLAG_JOIN, entries), partner.id)
+            box.stats.sent = box.stats.sent + 1
+        end
+    end
+end
+
+-- Boxes are read and changed only inside the game's GUI update (GuiAutoSaveFlowController.update runs
+-- every frame), where the game's own item box moves items: changing an inventory from REFramework's
+-- frame callbacks crashed the game a moment later on one of its worker threads.
+local M_GUI_UPDATE = sdk.find_type_definition("app.GuiAutoSaveFlowController"):get_method("update")
+if M_GUI_UPDATE then
+    sdk.hook(M_GUI_UPDATE, function()
+        local ok, err = pcall(box_late, now())
+        if not ok then say("item box error: %s", tostring(err)) end
+    end, nil)
+end
+
+-- dev
+box.read_box, box.box_inventories, box.pack_box = read_box, box_inventories, pack_box
+end
+
+-------------------------------------------------------------------------------------------------
+-- saving together
+-------------------------------------------------------------------------------------------------
+-- When the lobby owner's game saves (an autosave or a typewriter save), the guest's game makes an
+-- autosave too, the game's own way (GuiManager.AutoSaveFlow.requestAutoSave with the game's
+-- default settings: an Auto slot, the empty or oldest one), so both saves hold the same moment and
+-- the guest's manual slots are never written. A save is noticed by the save service's serial
+-- number moving on to a game slot (not the system slot). The guest's game saves as soon as it can:
+-- not in a cutscene, alive, not loading, and saving allowed there (the game blocks it in some
+-- fights). To go on later: both load their latest save, host and join again; the lobby owner's world
+-- (locks, story, boxes) is sent on joining.
+local saves, saves_late
+do
+local T_AUTOSAVE_ARGS = "app.GuiAutoSaveFlowRequestArgs"
+local PHASE_IDLE, PHASE_UPDATE = 0, 1
+
+saves = { serial = nil, serial_t = 0, wait_slot = nil, pending = nil, own_until = 0, stats = { sent = 0, made = 0 } }
+
+local function save_service()
+    return sdk.get_managed_singleton("app.SaveServiceManager")
+end
+
+-- the slot id holding the save with this serial number (-1 is the system slot), or nil
+local function slot_of_serial(serial)
+    local ssm = save_service()
+    local d = ssm and ssm:get_field("_SaveSlotInfoDict")
+    local entries = d and d:get_field("_entries")
+    local n = d and d:get_field("_count") or 0
+    for i, e in ipairs(entries and entries:get_elements() or {}) do
+        if i > n then break end
+        local v = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
+        local k = v and e:get_field("key")
+        if k and v:get_field("_SerialNumber") == serial then return k:get_field("_SlotId") end
+    end
+    return nil
+end
+
+local function auto_save_flow()
+    local gm = sdk.get_managed_singleton("app.GuiManager")
+    local ok, flow = pcall(function() return gm and gm:call("get_AutoSaveFlow") end)
+    return ok and flow or nil
+end
+
+local function can_save_now()
+    if me.go == nil or me.pc == nil or in_cutscene() then return false end
+    local hp = me.pc:call("get_HitPoint")
+    if hp and (hp:call("get_CurrentHitPoint") or 0) <= 0 then return false end
+    local ssm = save_service()
+    if ssm == nil or ssm:call("get_IsBusy") or ssm:call("get_IsRejectingGameSlotSave")
+        or ssm:call("get_IsSuppressingGameSlotSave") then
+        return false
+    end
+    local flow = auto_save_flow()
+    local phase = flow and flow:get_field("_Phase")
+    return phase == PHASE_IDLE or phase == PHASE_UPDATE
+end
+
+-- an autosave, the way the game makes one
+local function make_save()
+    local flow = auto_save_flow()
+    local args = sdk.create_instance(T_AUTOSAVE_ARGS)
+    if flow == nil or args == nil then return false end
+    args:add_ref()
+    pcall(args.call, args, ".ctor")
+    saves.own_until = now() + 30
+    local ok = pcall(flow.call, flow, "requestAutoSave", args)
+    if ok then
+        saves.stats.made = saves.stats.made + 1
+        say("saved with the host (autosave)")
+    end
+    return ok
+end
+
+saves_ctrl = function(from, kind, data)
+    local st_net = session.status
+    if not world_shared() or not cfg.save_with_host or not st_net or from ~= st_net.owner or st_net.is_host then return end
+    local _, chapter = string.unpack("<Bs1", data)
+    saves.pending = { since = now(), chapter = chapter }
+    say("the host saved: saving here too")
+end
+
+saves_late = function(t_now)
+    -- the lobby owner: did our game just save into a game slot?
+    if t_now >= saves.serial_t then
+        saves.serial_t = t_now + 1
+        local ssm = save_service()
+        local serial = ssm and ssm:get_field("_CurrentSaveSerialNumber")
+        if serial and saves.serial == nil then
+            saves.serial = serial
+        elseif serial and serial ~= saves.serial then
+            saves.serial, saves.wait_slot = serial, { serial = serial, till = t_now + 30 }
+        end
+        local w = saves.wait_slot
+        if w and not (ssm and ssm:call("get_IsProcessingSave")) then
+            local slot = slot_of_serial(w.serial)
+            if slot ~= nil or t_now > w.till then saves.wait_slot = nil end
+            local st_net = session.status
+            if slot ~= nil and slot >= 0 and world_shared() and st_net and st_net.is_host and t_now >= saves.own_until then
+                send_ctrl(string.pack("<Bs1", MSG_SAVE, me.chapter))
+                saves.stats.sent = saves.stats.sent + 1
+                say("saved: your partner's game saves too")
+            end
+        end
+    end
+    -- the guest: save once we can
+    local p = saves.pending
+    if p and can_save_now() then
+        saves.pending = nil
+        make_save()
+    elseif p and t_now - p.since > 300 then
+        saves.pending = nil
+        say("couldn't save with the host (no chance to in 5 minutes)")
+    end
+end
+
+-- dev: the slot a serial number went to, and a save the guest way
+saves.slot_of_serial, saves.make_save, saves.can_save_now = slot_of_serial, make_save, can_save_now
 end
 
 
@@ -2244,6 +2683,8 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("gimmick error: %s", tostring(err)) end
     ok, err = pcall(story_late, t_now)
     if not ok then say("story error: %s", tostring(err)) end
+    ok, err = pcall(saves_late, t_now)
+    if not ok then say("save error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
@@ -2256,7 +2697,7 @@ re.on_frame(function()
     end
     if story and story.follow.target then
         local left = math.max(0, math.ceil(story.follow.at - now()))
-        local msg = left > 0 and string.format("Following the host to %s in %d...", story.follow.target, left)
+        local msg = left > 0 and story.follow.tries == 0 and string.format("Following the host to %s in %d...", story.follow.target, left)
             or string.format("Going to %s...", story.follow.target)
         draw.text(msg, 960 - #msg * 3.5, 60, 0xFF80FFFF)
     end
@@ -2371,6 +2812,8 @@ re.on_draw_ui(function()
         world.stats.doors_sent, world.stats.doors_applied, world.stats.items_sent, world.stats.items_applied))
     imgui.text(string.format("Locks, puzzles, switches: sent %d, applied %d.", gim.stats.sent, gim.stats.applied))
     imgui.text(string.format("Story steps: sent %d, applied %d. Chapter jumps %d.", story.stats.sent, story.stats.applied, story.stats.jumps))
+    imgui.text(string.format("Item box: changes sent %d, applied %d. Saves: told partner %d, saved with host %d.",
+        box.stats.sent, box.stats.applied, saves.stats.sent, saves.stats.made))
 
     imgui.separator()
     local c, v = imgui.checkbox("Self test (see your own echo next to you)", loopback)
@@ -2383,6 +2826,8 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Share locks, puzzles and switches", cfg.gimmick_sync); if c then cfg.gimmick_sync, changed = v, true end
     c, v = imgui.checkbox("Share story progress (experimental)", cfg.story_sync); if c then cfg.story_sync, changed = v, true end
     c, v = imgui.checkbox("Follow the host to new chapters (guest)", cfg.follow_host); if c then cfg.follow_host, changed = v, true end
+    c, v = imgui.checkbox("One item box for both players", cfg.box_sync); if c then cfg.box_sync, changed = v, true end
+    c, v = imgui.checkbox("Save when the host saves (guest; an autosave)", cfg.save_with_host); if c then cfg.save_with_host, changed = v, true end
     c, v = imgui.checkbox("Name tags", cfg.nametags); if c then cfg.nametags, changed = v, true end
     c, v = imgui.slider_int("Pose updates per second", cfg.send_hz, 5, 30); if c then cfg.send_hz, changed = v, true end
     c, v = imgui.slider_float("Smoothing delay (s)", cfg.interp_delay, 0.05, 0.4); if c then cfg.interp_delay, changed = v, true end
@@ -2404,4 +2849,5 @@ end
 -- dev hooks for automated tests (harmless in normal play)
 _G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes,
     teleport_to_partner = teleport_to_partner, world = world, gim = gim, story = story,
-    go_to_partner_chapter = go_to_partner_chapter }
+    go_to_partner_chapter = go_to_partner_chapter, box = box, box_ctrl = box_ctrl, saves = saves,
+    saves_ctrl = saves_ctrl }

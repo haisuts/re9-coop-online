@@ -156,4 +156,54 @@ re.on_pre_application_entry("UpdateBehavior", function()
     run_cmd(src, id)
 end)
 
+-- Save guard for tests: while reframework/data/re9coop_bridge/block_saves.flag holds "1", every save
+-- request into a game slot (Auto / Game / by slot index or address) is skipped and listed in
+-- dev.saves, so tests never write the player's save files. System-slot saves go through.
+local SAVE_FLAG = "re9coop_bridge/block_saves.flag"
+local block_t, block_v = -1, false
+local function saves_blocked()
+    local t = os.clock()
+    if t - block_t > 1 then
+        block_t = t
+        local ok, s = pcall(fs.read, SAVE_FLAG)
+        block_v = ok and s ~= nil and s:sub(1, 1) == "1"
+    end
+    return block_v
+end
+dev.saves = {}
+local skipped = false
+local T_SSM = sdk.find_type_definition("app.SaveServiceManager")
+for _, sig in ipairs({
+    "requestSave(app.SaveSlotCategory, app.SaveSlotSelectionMethod, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+    "requestSave(app.SaveSlotCategory, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+    "requestSave(app.SaveSlotIndex, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+    "requestSave(app.SaveSlotAddress, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+    "requestSaveCore(app.SaveSlotCategory, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+    "requestSaveCore(app.SaveSlotSegmentType, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+}) do
+    local m = T_SSM:get_method(sig)
+    if m == nil then
+        log.info("[re9coop devbridge] no method " .. sig)
+    else
+        local short = sig:match("^[^(]+") .. "(" .. sig:match("%(([%w%.]+)")
+        sdk.hook(m, function(args)
+            local a = sdk.to_int64(args[3]) & 0xFFFFFFFF
+            local b = sdk.to_int64(args[4]) & 0xFFFFFFFF
+            local by_category = short:find("SaveSlotCategory", 1, true) ~= nil
+            local block = saves_blocked() and (not by_category or a ~= 1)
+            local line = string.format("%s %s %d %d %s", os.date("%H:%M:%S"), short, a, b, block and "BLOCKED" or "passed")
+            dev.saves[#dev.saves + 1] = line
+            log.info("[re9coop devbridge] save " .. line)
+            skipped = block
+            if block then return sdk.PreHookResult.SKIP_ORIGINAL end
+        end, function(retval)
+            if skipped then
+                skipped = false
+                return sdk.to_ptr(0)
+            end
+            return retval
+        end)
+    end
+end
+
 log.info("[re9coop devbridge] ready")

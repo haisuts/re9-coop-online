@@ -248,6 +248,44 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
 - Lua main chunk hit the 200-locals limit: the doors/pickups, gimmick and story sections are now
   `do ... end` blocks exporting only what other code uses.
 
+## v0.6.0 status (2026-10-14 21:20)
+
+- Dead enemies: when the runner's copy reports F_DEAD, the other game releases its puppet (AI back)
+  and deals lethal damage through `HitPoint.addDamageHitPoint` (bypassing the forward hook). One-PC
+  echo test: zombie B (copy of A) -> `get_IsDead` true, HP 0, death animation; both bodies on the floor.
+- Item box: inventories per `InventoryManager._Inventories` key (`_User:ToString()` + `_BoardType`):
+  None/2 (ShareItemBox), User00/1, User01/1 (ItemBox, 1x100 list, every panel 1x1). Read with
+  `getPanelStates()` (ItemID `_Name`, stock, position, rotation, loaded ammo via
+  `ContainItemState._AmountData._ItemID/_Stock`). Changes as ops, applied with
+  `addPanel(ItemID, Int32, via.Int2, RotateType, ItemStockChangedEventType)`, `reloadDirect`,
+  `removePanel(PanelKey, EventType)`. `ItemStockChangedEventType` is an enum class: static objects
+  Default, Discard, Reloaded, Unloaded, Switched, Moved, Craft, Backup, Missable, Append, CarryOver.
+  `addPanelImpl(PanelItemSaveData)` and `restoreFrom` throw.
+- CRASHES (c0000005 in runtime code ~re9.exe+0x555xxxx-0x558xxxx; stack via tools/dump_stack.py +
+  method address map: `LockOnTargetDriver.onUpdateScanPhase` -> `CharacterRoleActionDriver
+  .get_IsRoleMode` -> `BitArrayApp.isTrue` on a worker thread): changing any inventory (add or remove,
+  any event type, mergeOrAdd/consumeStock too, even Grace's own box) from REFramework callbacks
+  (pre UpdateBehavior, post LateUpdateBehavior, post BeginRendering) crashed within seconds in ~1 of 3
+  ops. The same ops run inside a hook of `app.GuiAutoSaveFlowController.update()` (GUI update, every
+  frame): 26 ops in a row incl. reloadDirect and removing loaded guns, no crash. Rule: change
+  inventories only from inside the game's GUI update.
+- Full box flow (simulated partner): partner's loaded gun + ammo put in; our own removal sent (no
+  echo); partner's removal applied; join merge adds the owner's items, sends back ours; stable.
+- Saves: `app.SaveServiceManager` slots via `_SaveSlotInfoDict` (key `_SlotId`, value
+  `_SerialNumber`): -1 system (data00-1), 0, 1, 10, 11. `_CurrentSaveSerialNumber` moves on every save
+  (system ones too). The game's autosave: `GuiManager.<AutoSaveFlow>` (`GuiAutoSaveFlowController`),
+  `requestAutoSave(GuiAutoSaveFlowRequestArgs)`; default args = Auto (2) / EmptyOrOldest (2049).
+  Phases: Idle 0, Update 1, RequestGameSave 2, GameSaveWait 3, ... The guest's save reached
+  `requestSave(Auto, 2049)` (blocked by the dev save guard: dev bridge skips game-slot saves while
+  re9coop_bridge/block_saves.flag holds "1"). Boot writes a System save (`requestSaveCore(System, 0)`).
+- Follow: with a fake host in Chap3_03, the countdown showed, then the jump loaded Chap3_0304. Chapters
+  now compare by "Chap<N>_<NN>" so a folder name (Chap3_0304) and its chapter (Chap3_03) match.
+- Live locks: `GmLockV2._GmLockData` is the same object as the context's StructureData (so writing it
+  directly reaches the running gimmick; `restore` swaps in copies). Setting `_UnlockCount` to max makes
+  `get_IsUnlock()` true, but `_IsCurrLock` stays true (updateLockSync re-derives it); the running state
+  only flips through the key-use scene (`GmUseKeyItemV3`). Not shipped.
+- Occasionally `scene:findComponents(Type)` hands back a non-array; lookups are pcall'd now.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
