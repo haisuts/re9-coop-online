@@ -223,6 +223,31 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
 - FPS camera keeps its own yaw after a player warp: WinDrive `rel` turns of >600 px per event are
   unreliable; step in <=600 px chunks (45.5 px per degree at default sensitivity).
 
+
+## v0.5.0 status (2026-10-14 08:00)
+
+- Gimmicks: `GimmickManager._GimmickContextCache` (684 contexts in Chap3_02, 558 with GmBaseData;
+  full scan 8 ms -> 60 per frame). `GimmickContext:store()` returns COPIES; `restore(SaveData)` returns
+  true and replaces the live StructureData objects. But a running gimmick rewrites its data from its
+  runtime state within a frame (door Gm01_144: `_IsLock` back to true; its lock is the key gimmick
+  Gm02_013 next to it). Tried and failed to change a running lock: restore, live set_field + onDirty,
+  `GimmickCore.setup()`, `GmDoorV3.assignDataContainer`, `requestInfo(0,0,Normal)`,
+  `StructureDataContainer.insertStructureData` (made `_IsDone` stick, not the lock),
+  `GimmickManager.requestGimmickForceEnd`. So gimmick data sync only helps gimmicks that aren't
+  loaded; the mod ignores its own rewrite for 3 s after applying (no ping-pong).
+  `via.Serializer.serializeJsonInternal(obj, nil, nil)` returned "null"; no deserializer in the TDB.
+- Story: `LevelFlowManager._ProgressiveNumberList` Dictionary<uint,int> (637 flows; read via
+  `_entries[i].key/value/hashCode`, `_count`). Hooked `setProgressiveNumber(UInt32, Int32)`; replay with
+  `requestChangeProgressiveNumber`. Not exercised end to end (needs two players).
+- Chapter jump verified: `MainGameFlowManager:setOverrideNextJumpScene("Chap3_03")` +
+  `LevelFlowManager:requestGameJump()` loaded the next part (player folder Chap3_0304, its cutscene
+  started). No save was written (killed the game during the cutscene). Saves backed up first.
+- Cutscene flag: `app.TimelineEventMediator:get_IsPlayingCutScene()` true during that cutscene.
+- Public lobby (`host(2, 2)`, plugin 0.2.0) created; `sdk.copy_to_clipboard(id)` puts the lobby ID on
+  the clipboard (checked with Get-Clipboard).
+- Lua main chunk hit the 200-locals limit: the doors/pickups, gimmick and story sections are now
+  `do ... end` blocks exporting only what other code uses.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

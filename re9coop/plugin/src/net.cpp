@@ -353,13 +353,14 @@ void tick() {
     send_hellos(now);
 }
 
-bool host(int max_members) {
+bool host(int max_members, int lobby_type) {
     std::lock_guard _{g_mx};
     if (!g_inited && !init()) return false;
     if (g_st.state == State::InLobby) leave();
     if (g_pending != Pending::None) return false;
     g_st.error.clear();
-    g_call = g_api.CreateLobby(mm(), steam::k_ELobbyTypeFriendsOnly, std::clamp(max_members, 2, 4));
+    const auto type = lobby_type == 2 ? steam::k_ELobbyTypePublic : steam::k_ELobbyTypeFriendsOnly;
+    g_call = g_api.CreateLobby(mm(), type, std::clamp(max_members, 2, 4));
     if (g_call == steam::k_uAPICallInvalid) {
         set_error("CreateLobby refused");
         return false;

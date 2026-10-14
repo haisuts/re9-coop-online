@@ -44,7 +44,7 @@ bool init();                 // resolves steam_api64.dll; false if Steam isn't a
 void tick();                 // polls call results, refreshes members, pumps loopback
 void shutdown();
 
-bool host(int max_members);
+bool host(int max_members, int lobby_type); // 1 friends-only, 2 public (anyone with the ID)
 bool join(std::uint64_t lobby);
 void leave();
 bool invite_overlay();

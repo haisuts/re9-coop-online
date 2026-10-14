@@ -18,8 +18,8 @@
 --   host's data. Damage the guest deals (HitPoint.addDamageHitPoint / addDamageReactionHP) is caught
 --   before it lands and sent to the host, which applies it to the real enemy.
 
-local VERSION = "0.4.0"
-local PROTO = 3
+local VERSION = "0.5.0"
+local PROTO = 4
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -43,6 +43,10 @@ local cfg = {
     enemy_hz = 15,            -- enemy updates per second (host)
     enemy_posed = 4,          -- how many enemies nearest to the guest get their full skeleton
     world_sync = true,        -- share door pushes and pickups
+    gimmick_sync = true,      -- share gimmick states (locks, puzzles, switches, used keys)
+    story_sync = true,        -- share story progress (level flow steps); experimental
+    follow_host = true,       -- the guest goes to the host's chapter
+    public_lobby = false,     -- anyone with the lobby ID can join (otherwise friends and invitees)
 }
 
 local function load_cfg()
@@ -179,6 +183,7 @@ local me = {
 }
 
 local on_player_lost -- set below: puppets are rebuilt whenever our player object goes away
+local in_cutscene -- set in the "story" section: true while a cutscene plays here
 
 local function forget_player()
     if me.go ~= nil and on_player_lost then on_player_lost() end
@@ -289,6 +294,9 @@ local MSG_SHOT, MSG_SOUND = 9, 10
 local MSG_ENEMY, MSG_ENEMY_SKEL, MSG_REQ_ENEMY_SKEL, MSG_ENEMY_DAMAGE = 11, 12, 13, 14
 local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
 local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
+local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
+local MSG_STORY = 21
+local FLAG_CUTSCENE = 64
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
 local function q16(v)
@@ -343,6 +351,7 @@ local function local_flags()
         if common:call("get_IsShooting") then f = f | 8 end
     end
     if me.pc:call("get_IsFPSCharacter") then f = f | 16 end
+    if in_cutscene and in_cutscene() then f = f | FLAG_CUTSCENE end
     local fc = me.flashlight
     if fc and fc:get_field("_IsLighting") and fc:get_field("_CurrentLightObject") and fc:get_field("_CurrentLight") then
         f = f | FLAG_FLASHLIGHT
@@ -365,6 +374,8 @@ local function msg_pose(t)
     local q = {}
     for _, j in ipairs(me.joints) do pack_quat(j:call("get_LocalRotation"), q) end
     local msg = head .. string.pack("<" .. string.rep("h", #q), table.unpack(q))
+    local hp = me.pc:call("get_HitPoint")
+    msg = msg .. string.pack("<i4i4", hp and hp:call("get_CurrentHitPoint") or 0, hp and hp:call("get_CurrentMaximumHitPoint") or 0)
     -- flashlight: where the beam is relative to the body, and how it looks
     local fc = me.flashlight
     if fc and fc:get_field("_IsLighting") then
@@ -399,6 +410,7 @@ local function read_pose(data)
         qx, qy, qz, qw, pos = string.unpack("<hhhh", data, pos)
         s.j[i] = unpack_quat(qx, qy, qz, qw)
     end
+    s.hp, s.hp_max, pos = string.unpack("<i4i4", data, pos)
     if s.flags & FLAG_FLASHLIGHT ~= 0 and #data >= pos + 31 then
         local cone, spread
         x, y, z, qx, qy, qz, qw, s.light_intensity, cone, spread, pos = string.unpack("<fffhhhhfff", data, pos)
@@ -669,6 +681,8 @@ local LOOPBACK_ID = "1"
 local peers = {}          -- steam id string -> peer
 local enemy_ctrl, enemy_recv, enemies_reset -- set in the "shared enemies" section
 local world_ctrl, world_reset -- set in the "shared doors and pickups" section
+local gimmick_ctrl, gimmick_reset -- set in the "shared gimmick states" section
+local story_ctrl, story_reset, go_to_partner_chapter -- set in the "story" section
 local loopback = false
 local stats = { tx = 0, rx = 0, tx_bytes = 0, rx_bytes = 0, rate_t = 0, tx_kbps = 0, rx_kbps = 0 }
 
@@ -735,6 +749,8 @@ on_player_lost = function()
     end
     if enemies_reset then enemies_reset(false) end
     if world_reset then world_reset() end
+    if gimmick_reset then gimmick_reset() end
+    if story_reset then story_reset() end
 end
 
 local function send_ctrl(data, to)
@@ -786,6 +802,10 @@ local function on_ctrl(from, data)
         enemy_ctrl(from, kind, data)
     elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN) and world_ctrl then
         world_ctrl(from, kind, data)
+    elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS) and gimmick_ctrl then
+        gimmick_ctrl(from, kind, data)
+    elseif kind == MSG_STORY and story_ctrl then
+        story_ctrl(from, kind, data)
     end
 end
 
@@ -838,8 +858,10 @@ local function update_peer(p, t_now)
     local snaps = p.snaps
     local stale = t_now - p.last > 5
     local same_place = p.chapter == me.chapter
-    pup:set_visible(#snaps > 0 and not stale and same_place)
-    if #snaps == 0 or stale or not same_place then return end
+    local last = snaps[#snaps]
+    local cutscene = (last and last.flags and last.flags & FLAG_CUTSCENE ~= 0) or (in_cutscene and in_cutscene())
+    pup:set_visible(#snaps > 0 and not stale and same_place and not cutscene)
+    if #snaps == 0 or stale or not same_place or cutscene then return end
     local rt = t_now - p.off - cfg.interp_delay
     local a, b = snaps[#snaps], snaps[#snaps]
     for i = #snaps - 1, 1, -1 do
@@ -1506,6 +1528,8 @@ end
 -- Doors and items are matched by their scene GUIDs (GimmickCore / ItemCore context IDs). Items made
 -- at runtime (enemy drops) have per-PC IDs and aren't shared. Key-locked doors aren't unlocked for
 -- the partner yet.
+local world, world_shared, world_late
+do
 local DOOR_AUTO_CLOSE = 1
 local T_DOOR_REQUEST = "app.GmDoorV3.RequestInfo"
 local M_DOOR_FORCE = sdk.find_type_definition("app.GmDoorV3"):get_method("addForce(app.GmDoorV3.RequestInfo)")
@@ -1515,7 +1539,7 @@ local TYPE_ITEM = sdk.typeof("app.ItemCore")
 local TYPE_GIMMICK_CORE = sdk.typeof("app.GimmickCore")
 local T_SCENE_MANAGER = sdk.find_type_definition("via.SceneManager")
 
-local world = {
+world = {
     doors = {}, door_ids = {},  -- id -> GmDoorV3, GmDoorV3 address -> id
     items = {}, item_ids = {},  -- id -> ItemCore, ItemCore address -> id
     index_t = 0, index_chapter = "",
@@ -1559,7 +1583,7 @@ local function refresh_world(t_now)
     world.doors, world.door_ids, world.items, world.item_ids = doors, door_ids, items, item_ids
 end
 
-local function world_shared()
+world_shared = function()
     if me.go == nil or not cfg.world_sync then return false end
     if loopback then return true end
     local st_net = session.status
@@ -1620,7 +1644,7 @@ world_ctrl = function(from, kind, data)
     end
 end
 
-local function world_late(t_now)
+world_late = function(t_now)
     if not world_shared() then return end
     refresh_world(t_now)
     if #world.out == 0 then return end
@@ -1636,6 +1660,8 @@ local function world_late(t_now)
         end
     end
 end
+end
+
 
 -- Teleport our player 1 m behind the partner (same chapter only), like walking up to them.
 local function partner_to_follow()
@@ -1656,6 +1682,434 @@ local function teleport_to_partner()
     local ok = pcall(cm.call, cm, WARP_SIG, me.pc:call("get_ID"), nullable_vec3(pos), nullable_quat(s.rot))
     return ok and ("went to " .. p.name) or "couldn't move you"
 end
+
+-------------------------------------------------------------------------------------------------
+-- shared gimmick states: locks, puzzles, switches, used keys, solved locks...
+-------------------------------------------------------------------------------------------------
+-- Every gimmick (app.GimmickContext, ~700 per chapter) keeps its state in typed StructureData
+-- objects; app.structure.GmBaseData has the common progress fields (_IsLock, _IsDone,
+-- _IsInteracted, _IsOperable, _ProgressIndex...). We scan the contexts a slice per frame and
+-- fingerprint their logical fields (bools and integers; positions, rates and map-icon data are left
+-- out). A change is sent to the partner, whose game stores the context, writes the fields in and
+-- restores it: the path the game uses to load a save. A gimmick that isn't loaded there picks the
+-- state up when its area loads (a lock already open, a puzzle already solved). One that is running
+-- right now keeps following its own runtime state (the game rewrites the data from it), so live
+-- actions are shared per kind instead (door pushes above). On joining, the lobby owner sends every
+-- gimmick's state once. The gimmick global bit flags are OR-ed.
+local gim, gimmicks_late
+do
+local GIMMICK_SKIP_TYPES = {
+    ["app.structure.PostureData"] = true,
+    ["app.structure.StaySectionData"] = true,
+    ["app.structure.GmMapIconStatusV2"] = true,
+}
+local GIMMICK_PER_FRAME = 60
+local T_BOOL, T_INT = 1, 2
+
+gim = {
+    fields = {},          -- structure type name -> { {name, tag}, ... } (logical fields only)
+    sig = {},             -- context id -> last known fingerprint
+    sent_at = {},         -- context id -> last send time (rate limit)
+    applied_at = {},      -- context id -> when we applied the partner's state (our game's rewrite isn't news)
+    cursor = 1, contexts = nil, contexts_t = 0, chapter = "",
+    full_pending = nil,   -- list of context ids still to send in the initial full sync (lobby owner)
+    full_done_for = nil,  -- peer id we did the full sync for
+    flags_sent = { -1, -1 },
+    out = {},
+    applying = false,
+    stats = { sent = 0, applied = 0 },
+}
+
+local function gimmick_manager()
+    return sdk.get_managed_singleton("app.GimmickManager")
+end
+
+local function logical_fields(obj)
+    local td = obj:get_type_definition()
+    local tname = td:get_full_name()
+    local f = gim.fields[tname]
+    if f then return tname, f end
+    f = {}
+    if not GIMMICK_SKIP_TYPES[tname] and not tname:find("MapIcon", 1, true) then
+        local t = td
+        while t and t:get_full_name() ~= "app.StructureData" and t:get_full_name() ~= "System.Object" do
+            for _, fl in ipairs(t:get_fields()) do
+                if not fl:is_static() then
+                    local ft = fl:get_type()
+                    local fname = ft:get_full_name()
+                    if fname == "System.Boolean" then
+                        f[#f + 1] = { fl:get_name(), T_BOOL }
+                    elseif fname == "System.Int32" or fname == "System.UInt32" or fname == "System.Int16"
+                        or fname == "System.UInt16" or fname == "System.Byte" or fname == "System.SByte"
+                        or (ft:is_enum()) then
+                        f[#f + 1] = { fl:get_name(), T_INT }
+                    end
+                end
+            end
+            t = t:get_parent_type()
+        end
+    end
+    gim.fields[tname] = f
+    return tname, f
+end
+
+-- { {type, field, tag, value}, ... } of a context's live state, and its fingerprint
+local function gimmick_state(gc)
+    local save = gc:call("store")
+    local arr = save and save:get_field("_StructureDatas")
+    local entries, parts = {}, {}
+    for _, x in ipairs(arr and arr:get_elements() or {}) do
+        local tname, fields = logical_fields(x)
+        for _, fd in ipairs(fields) do
+            local ok, v = pcall(x.get_field, x, fd[1])
+            if ok and v ~= nil then
+                local num = fd[2] == T_BOOL and (v and 1 or 0) or (type(v) == "number" and math.floor(v) or 0)
+                entries[#entries + 1] = { tname, fd[1], fd[2], num }
+                parts[#parts + 1] = num
+            end
+        end
+    end
+    return entries, table.concat(parts, ",")
+end
+
+local function context_id(gc)
+    local id = gim.ids and gim.ids[gc:get_address()]
+    if id then return id end
+    local ok, s = pcall(function() return gc:call("get_ContextID"):call("ToString") end)
+    return ok and s or nil
+end
+
+local function gimmick_contexts(t_now)
+    if gim.contexts == nil or t_now >= gim.contexts_t or gim.chapter ~= me.chapter then
+        local gm = gimmick_manager()
+        local arr = gm and gm:get_field("_GimmickContextCache")
+        gim.contexts = arr and arr:get_elements() or {}
+        gim.contexts_t, gim.chapter = t_now + 10, me.chapter
+        gim.ids, gim.by_id = {}, {}
+        for _, gc in ipairs(gim.contexts) do
+            local ok, id = pcall(function() return gc:call("get_ContextID"):call("ToString") end)
+            if ok and id then gim.ids[gc:get_address()], gim.by_id[id] = id, gc end
+        end
+        if gim.cursor > #gim.contexts then gim.cursor = 1 end
+    end
+    return gim.contexts
+end
+
+local function pack_gimmick(id, entries, full)
+    local t = { string.pack("<Bs1s1BH", MSG_GIMMICK, me.chapter, id, full and 1 or 0, #entries) }
+    for _, e in ipairs(entries) do t[#t + 1] = string.pack("<s1s1Bi8", e[1], e[2], e[3], e[4]) end
+    return table.concat(t)
+end
+
+local function gimmick_scan(t_now)
+    local list = gimmick_contexts(t_now)
+    local n = #list
+    if n == 0 then return end
+    for _ = 1, math.min(GIMMICK_PER_FRAME, n) do
+        if gim.cursor > n then gim.cursor = 1 end
+        local gc = list[gim.cursor]
+        gim.cursor = gim.cursor + 1
+        local id = gc and context_id(gc)
+        if id then
+            local ok, entries, sig = pcall(gimmick_state, gc)
+            if ok then
+                local old = gim.sig[id]
+                gim.sig[id] = sig
+                -- a gimmick that is running here rewrites its data from its own state right after we
+                -- restore the partner's; that is not a change of ours, so it isn't sent back
+                local echo = t_now - (gim.applied_at[id] or -10) < 3
+                if old ~= nil and old ~= sig and not echo and #entries > 0 and t_now - (gim.sent_at[id] or -10) > 0.5 and #gim.out < 64 then
+                    gim.sent_at[id] = t_now
+                    gim.out[#gim.out + 1] = pack_gimmick(id, entries, false)
+                end
+            end
+        end
+    end
+end
+
+
+local function apply_gimmick(data)
+    local _, chapter, id, full, n, pos = string.unpack("<Bs1s1BH", data)
+    if chapter ~= me.chapter then return end
+    local want = {}
+    for _ = 1, n do
+        local tname, fname, tag, v
+        tname, fname, tag, v, pos = string.unpack("<s1s1Bi8", data, pos)
+        want[tname] = want[tname] or {}
+        want[tname][fname] = tag == T_BOOL and (v ~= 0) or v
+    end
+    gimmick_contexts(now())
+    local gc = gim.by_id[id]
+    if gc == nil then return end
+    local save = gc:call("store")
+    local arr = save and save:get_field("_StructureDatas")
+    local changed = false
+    for _, x in ipairs(arr and arr:get_elements() or {}) do
+        local w = want[x:get_type_definition():get_full_name()]
+        if w then
+            for fname, v in pairs(w) do
+                local ok, cur = pcall(x.get_field, x, fname)
+                if ok and cur ~= v then
+                    x:set_field(fname, v)
+                    changed = true
+                end
+            end
+        end
+    end
+    if changed then
+        gim.applying = true
+        pcall(gc.call, gc, "restore", save)
+        gim.applying = false
+        gim.applied_at[id] = now()
+        gim.stats.applied = gim.stats.applied + 1
+    end
+    local ok, _, sig = pcall(gimmick_state, gc)
+    if ok then gim.sig[id] = sig end -- what we now have is not a change of ours
+end
+
+-- the lobby owner sends every gimmick once when a partner shows up in the same chapter
+local function gimmick_full_sync(t_now, peer_id)
+    if gim.full_done_for ~= peer_id then
+        gim.full_done_for = peer_id
+        gim.full_pending = {}
+        for _, gc in ipairs(gimmick_contexts(t_now)) do gim.full_pending[#gim.full_pending + 1] = gc end
+        say("sending %d gimmick states to your partner", #gim.full_pending)
+    end
+    local pending = gim.full_pending
+    if pending == nil or #pending == 0 then return end
+    for _ = 1, 20 do
+        local gc = table.remove(pending)
+        if gc == nil then break end
+        local id = context_id(gc)
+        local ok, entries, sig = pcall(gimmick_state, gc)
+        if id and ok and #entries > 0 then
+            gim.sig[id] = sig
+            send_ctrl(pack_gimmick(id, entries, true), peer_id)
+            gim.stats.sent = gim.stats.sent + 1
+        end
+    end
+end
+
+local function gimmick_flags()
+    local gm = gimmick_manager()
+    if gm == nil then return end
+    local f1, f2 = gm:get_field("_GlobalBitFlags") or 0, gm:get_field("_GlobalBitFlags2") or 0
+    if f1 ~= gim.flags_sent[1] or f2 ~= gim.flags_sent[2] then
+        gim.flags_sent = { f1, f2 }
+        send_ctrl(string.pack("<Bs1I4I4", MSG_GIMMICK_FLAGS, me.chapter, f1, f2))
+    end
+end
+
+local function apply_gimmick_flags(data)
+    local _, chapter, f1, f2 = string.unpack("<Bs1I4I4", data)
+    local gm = gimmick_manager()
+    if gm == nil or chapter ~= me.chapter then return end
+    local c1, c2 = gm:get_field("_GlobalBitFlags") or 0, gm:get_field("_GlobalBitFlags2") or 0
+    if c1 | f1 ~= c1 then pcall(gm.call, gm, "enableGlobalBitFlags", f1 & ~c1) end
+    if c2 | f2 ~= c2 then pcall(gm.call, gm, "enableGlobalBitFlags2", f2 & ~c2) end
+    gim.flags_sent = { gm:get_field("_GlobalBitFlags") or 0, gm:get_field("_GlobalBitFlags2") or 0 }
+end
+
+gimmick_ctrl = function(from, kind, data)
+    if not world_shared() then return end
+    if kind == MSG_GIMMICK then
+        pcall(apply_gimmick, data)
+    elseif kind == MSG_GIMMICK_FLAGS then
+        pcall(apply_gimmick_flags, data)
+    end
+end
+
+gimmick_reset = function()
+    gim.sig, gim.sent_at, gim.applied_at, gim.contexts, gim.cursor, gim.out = {}, {}, {}, nil, 1, {}
+    gim.ids, gim.by_id = {}, {}
+    gim.full_pending, gim.full_done_for, gim.flags_sent = nil, nil, { -1, -1 }
+end
+
+gimmicks_late = function(t_now)
+    if not world_shared() or not cfg.gimmick_sync then return end
+    gimmick_scan(t_now)
+    local st_net = session.status
+    local partner = partner_to_follow and partner_to_follow()
+    if st_net and st_net.is_host and partner and partner.id ~= LOOPBACK_ID and partner.chapter == me.chapter then
+        gimmick_full_sync(t_now, partner.id)
+    end
+    if #gim.out > 0 then
+        local out = gim.out
+        gim.out = {}
+        for _, blob in ipairs(out) do send_ctrl(blob) end
+        gim.stats.sent = gim.stats.sent + #out
+    end
+    if t_now >= (gim.next_flags or 0) then
+        gim.next_flags = t_now + 1
+        gimmick_flags()
+    end
+end
+end
+
+-------------------------------------------------------------------------------------------------
+-- shared story progress and chapters
+-------------------------------------------------------------------------------------------------
+-- The chapter's level flows (app.LevelFlowManager, ~640 per chapter) each keep a progress number
+-- (_ProgressiveNumberList: flow hash -> step). Every step either game takes
+-- (LevelFlowManager.setProgressiveNumber) is sent to the partner, whose game takes the same step
+-- through requestChangeProgressiveNumber, the game's own way to move a flow on. On joining, the lobby
+-- owner sends every flow that has moved. Chapters: when the lobby owner is in another chapter, the
+-- guest's game jumps there (MainGameFlowManager.setOverrideNextJumpScene + requestGameJump) after
+-- a 5 s countdown, unless "Follow the host to new chapters" is off.
+local story, story_late
+do
+local M_SET_PROGRESS = sdk.find_type_definition("app.LevelFlowManager"):get_method("setProgressiveNumber(System.UInt32, System.Int32)")
+local T_MEDIATOR = "app.TimelineEventMediator"
+
+story = {
+    expect = {},          -- flow hash -> value we asked for (its echo isn't sent back)
+    out = {},
+    full_done_for = nil,
+    follow = { target = nil, at = 0, tries = 0 },
+    stats = { sent = 0, applied = 0, jumps = 0 },
+}
+
+local function level_flow()
+    return sdk.get_managed_singleton("app.LevelFlowManager")
+end
+
+-- true while a cutscene plays here (cached per frame)
+local cutscene_cache = { t = -1, v = false }
+in_cutscene = function()
+    local t = now()
+    if t ~= cutscene_cache.t then
+        cutscene_cache.t = t
+        local m = sdk.get_managed_singleton(T_MEDIATOR)
+        local ok, v = pcall(function() return m and m:call("get_IsPlayingCutScene") end)
+        cutscene_cache.v = ok and v == true
+    end
+    return cutscene_cache.v
+end
+
+local function progress_list()
+    local lf = level_flow()
+    local d = lf and lf:get_field("_ProgressiveNumberList")
+    local entries = d and d:get_field("_entries")
+    local n = d and d:get_field("_count") or 0
+    local out = {}
+    if entries then
+        for i, e in ipairs(entries:get_elements()) do
+            if i > n then break end
+            local h = e:get_field("hashCode")
+            if h and h >= 0 then out[e:get_field("key")] = e:get_field("value") end
+        end
+    end
+    return out
+end
+
+sdk.hook(M_SET_PROGRESS, function(args)
+    if not world_shared() or not cfg.story_sync then return end
+    local hash = sdk.to_int64(args[3]) & 0xFFFFFFFF
+    local value = int32(sdk.to_int64(args[4]))
+    if story.expect[hash] == value then
+        story.expect[hash] = nil
+        return
+    end
+    if #story.out < 128 then
+        story.out[#story.out + 1] = string.pack("<Bs1I4i4", MSG_STORY, me.chapter, hash, value)
+    end
+end, nil)
+
+local function apply_story(data)
+    local _, chapter, hash, value = string.unpack("<Bs1I4i4", data)
+    if chapter ~= me.chapter then return end
+    local lf = level_flow()
+    if lf == nil then return end
+    local ok, cur = pcall(lf.call, lf, "getProgressiveNumber", hash)
+    if ok and cur == value then return end
+    story.expect[hash] = value
+    pcall(lf.call, lf, "requestChangeProgressiveNumber", hash, value)
+    story.stats.applied = story.stats.applied + 1
+end
+
+local function jump_to_chapter(name)
+    local mg = sdk.get_managed_singleton("app.MainGameFlowManager")
+    local lf = level_flow()
+    if mg == nil or lf == nil then return false end
+    pcall(mg.call, mg, "setOverrideNextJumpScene", name)
+    pcall(lf.call, lf, "requestGameJump")
+    story.stats.jumps = story.stats.jumps + 1
+    say("going to %s", name)
+    return true
+end
+
+-- "Chap3_0304" is a folder; if jumping to it doesn't work, try the chapter it belongs to ("Chap3_03")
+local function chapter_jump_name(folder, tries)
+    if tries % 2 == 0 then return folder end
+    return folder:match("^(Chap%d+_%d%d)%d%d$") or folder
+end
+
+local function host_peer()
+    local st_net = session.status
+    return st_net and st_net.owner ~= st_net.me and peers[st_net.owner] or nil
+end
+
+go_to_partner_chapter = function()
+    local p = partner_to_follow and partner_to_follow()
+    if p == nil or p.chapter == "" then return "no partner" end
+    if p.chapter == me.chapter then return "you're already in " .. me.chapter end
+    story.follow.tries = story.follow.tries + 1
+    jump_to_chapter(chapter_jump_name(p.chapter, story.follow.tries - 1))
+    return "going to " .. p.chapter
+end
+
+story_ctrl = function(from, kind, data)
+    if not world_shared() or not cfg.story_sync then return end
+    if kind == MSG_STORY then pcall(apply_story, data) end
+end
+
+story_reset = function()
+    story.expect, story.out, story.full_done_for = {}, {}, nil
+end
+
+story_late = function(t_now)
+    if not world_shared() then return end
+    local st_net = session.status
+    -- the lobby owner sends every flow that has moved, once per partner per chapter
+    local partner = partner_to_follow and partner_to_follow()
+    if cfg.story_sync and st_net and st_net.is_host and partner and partner.id ~= LOOPBACK_ID
+        and partner.chapter == me.chapter and story.full_done_for ~= partner.id then
+        story.full_done_for = partner.id
+        local n = 0
+        for hash, value in pairs(progress_list()) do
+            if value ~= 0 then
+                send_ctrl(string.pack("<Bs1I4i4", MSG_STORY, me.chapter, hash, value), partner.id)
+                n = n + 1
+            end
+        end
+        say("sent %d story steps to your partner", n)
+        story.stats.sent = story.stats.sent + n
+    end
+    if #story.out > 0 then
+        local out = story.out
+        story.out = {}
+        for _, blob in ipairs(out) do send_ctrl(blob) end
+        story.stats.sent = story.stats.sent + #out
+    end
+    -- follow the host into its chapter
+    local hp = host_peer()
+    local f = story.follow
+    if cfg.follow_host and hp and hp.chapter ~= "" and me.chapter ~= "" and hp.chapter ~= me.chapter
+        and #hp.snaps > 0 and t_now - hp.last < 3 and not in_cutscene() then
+        if f.target ~= hp.chapter then
+            f.target, f.at, f.tries = hp.chapter, t_now + 5, 0
+            say("the host is in %s: following in 5 s", hp.chapter)
+        elseif t_now >= f.at then
+            jump_to_chapter(chapter_jump_name(f.target, f.tries))
+            f.tries = f.tries + 1
+            f.at = t_now + 25 -- if we're still not there by then, try the other name
+        end
+    elseif f.target and (hp == nil or hp.chapter == me.chapter) then
+        f.target = nil
+    end
+end
+end
+
 
 local function set_loopback(v)
     loopback = v
@@ -1786,6 +2240,10 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("enemy error: %s", tostring(err)) end
     ok, err = pcall(world_late, t_now)
     if not ok then say("world error: %s", tostring(err)) end
+    ok, err = pcall(gimmicks_late, t_now)
+    if not ok then say("gimmick error: %s", tostring(err)) end
+    ok, err = pcall(story_late, t_now)
+    if not ok then say("story error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
@@ -1796,6 +2254,12 @@ re.on_frame(function()
             draw.text(msg, 960 - #msg * 3.5, 40, 0xFF80E0FF)
         end
     end
+    if story and story.follow.target then
+        local left = math.max(0, math.ceil(story.follow.at - now()))
+        local msg = left > 0 and string.format("Following the host to %s in %d...", story.follow.target, left)
+            or string.format("Going to %s...", story.follow.target)
+        draw.text(msg, 960 - #msg * 3.5, 60, 0xFF80FFFF)
+    end
     if not cfg.nametags then return end
     for _, p in pairs(peers) do
         local pup = p.puppet
@@ -1803,7 +2267,9 @@ re.on_frame(function()
             local hp = pup:head_position()
             local sp = hp and draw.world_to_screen(hp + Vector3f.new(0, 0.35, 0))
             if sp then
-                local label = p.name .. (p.rtt and string.format("  %d ms", math.floor(p.rtt * 1000)) or "")
+                local last = p.snaps[#p.snaps]
+                local hp = (last and last.hp_max and last.hp_max > 0) and string.format("  %d%%", math.floor(last.hp * 100 / last.hp_max)) or ""
+                local label = p.name .. hp .. (p.rtt and string.format("  %d ms", math.floor(p.rtt * 1000)) or "")
                 draw.text(label, sp.x - #label * 3.5, sp.y, 0xFFFFFFFF)
             end
         end
@@ -1844,9 +2310,16 @@ re.on_draw_ui(function()
 
     if st.state == "in_lobby" then
         imgui.text("Lobby " .. st.lobby .. ", " .. #st.members .. " player(s)")
+        imgui.same_line()
+        if imgui.button("Copy lobby ID") then
+            sdk.copy_to_clipboard(st.lobby)
+            say("lobby ID %s copied", st.lobby)
+        end
         if imgui.button("Invite friends (Steam overlay)") then net.invite() end
         imgui.same_line()
         if imgui.button("Teleport to partner") then say("%s", teleport_to_partner()) end
+        imgui.same_line()
+        if imgui.button("Go to partner's chapter") then say("%s", go_to_partner_chapter()) end
         imgui.same_line()
         if imgui.button("Leave") then
             send_ctrl(string.pack("<B", MSG_BYE))
@@ -1855,7 +2328,10 @@ re.on_draw_ui(function()
     elseif st.state == "creating" or st.state == "joining" then
         imgui.text("...")
     else
-        if imgui.button("Host a co-op session") then net.host(2) end
+        if imgui.button("Host a co-op session") then net.host(2, cfg.public_lobby and 2 or 1) end
+        imgui.same_line()
+        local cp, vp = imgui.checkbox("Anyone with the ID can join", cfg.public_lobby)
+        if cp then cfg.public_lobby = vp save_cfg() end
         imgui.same_line()
         if imgui.button("Refresh friends") or ui.friends == nil then
             ui.friends = net.friends()
@@ -1893,6 +2369,8 @@ re.on_draw_ui(function()
     end
     imgui.text(string.format("Doors: sent %d, opened for partner %d. Pickups: sent %d, removed %d.",
         world.stats.doors_sent, world.stats.doors_applied, world.stats.items_sent, world.stats.items_applied))
+    imgui.text(string.format("Locks, puzzles, switches: sent %d, applied %d.", gim.stats.sent, gim.stats.applied))
+    imgui.text(string.format("Story steps: sent %d, applied %d. Chapter jumps %d.", story.stats.sent, story.stats.applied, story.stats.jumps))
 
     imgui.separator()
     local c, v = imgui.checkbox("Self test (see your own echo next to you)", loopback)
@@ -1902,6 +2380,9 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Partner's muzzle flash and gun sounds", cfg.shot_fx); if c then cfg.shot_fx, changed = v, true end
     c, v = imgui.checkbox("Share enemies (both players need it on)", cfg.enemy_sync); if c then cfg.enemy_sync, changed = v, true end
     c, v = imgui.checkbox("Share doors and pickups", cfg.world_sync); if c then cfg.world_sync, changed = v, true end
+    c, v = imgui.checkbox("Share locks, puzzles and switches", cfg.gimmick_sync); if c then cfg.gimmick_sync, changed = v, true end
+    c, v = imgui.checkbox("Share story progress (experimental)", cfg.story_sync); if c then cfg.story_sync, changed = v, true end
+    c, v = imgui.checkbox("Follow the host to new chapters (guest)", cfg.follow_host); if c then cfg.follow_host, changed = v, true end
     c, v = imgui.checkbox("Name tags", cfg.nametags); if c then cfg.nametags, changed = v, true end
     c, v = imgui.slider_int("Pose updates per second", cfg.send_hz, 5, 30); if c then cfg.send_hz, changed = v, true end
     c, v = imgui.slider_float("Smoothing delay (s)", cfg.interp_delay, 0.05, 0.4); if c then cfg.interp_delay, changed = v, true end
@@ -1922,4 +2403,5 @@ end
 
 -- dev hooks for automated tests (harmless in normal play)
 _G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes,
-    teleport_to_partner = teleport_to_partner, world = world }
+    teleport_to_partner = teleport_to_partner, world = world, gim = gim, story = story,
+    go_to_partner_chapter = go_to_partner_chapter }

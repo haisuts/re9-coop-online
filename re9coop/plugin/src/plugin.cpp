@@ -22,7 +22,7 @@ extern "C" {
 
 #include "net.hpp"
 
-#define RE9COOP_NET_VERSION "0.1.0"
+#define RE9COOP_NET_VERSION "0.2.0"
 
 namespace {
 
@@ -79,7 +79,7 @@ int l_my_name(lua_State* L) {
 }
 
 int l_host(lua_State* L) {
-    lua_pushboolean(L, net::host(arg_int(L, 1, 2)));
+    lua_pushboolean(L, net::host(arg_int(L, 1, 2), arg_int(L, 2, 1)));
     return 1;
 }
 

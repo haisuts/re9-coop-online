@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.4.0
+# RE9 Co-op (online) — v0.5.0
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -12,49 +12,69 @@ from it is used.
   both of you. The other player sees the same enemy pose for pose; their hits on it count.
 - **Shared doors and pickups**: a door your partner pushes open opens in your game too; an item your
   partner picks up disappears from yours.
-- **Teleport to partner** (same chapter), and an on-screen note when you're in different chapters.
+- **Story steps (experimental)**: every level-flow step either of you takes is taken by the other
+  game too; a joining guest gets the host's chapter progress.
+- **Chapters**: when the host moves on, the guest's game follows 5 s later (countdown on screen).
+- **Locks, puzzles, switches**: their state goes to the partner and takes effect when that area loads
+  in the partner's game.
+- **Cutscenes**: the partner is hidden while either of you is in one.
+- **Teleport to partner**, partner health in the name tag, public lobbies and a "Copy lobby ID" button.
 
-**Not shared yet:** key-locked doors (a key used by one player doesn't unlock the other's door),
-events, cutscenes and story progress. Each of you still plays your own copy of the game and your own
-inventory; load the same chapter (ideally the same save) to play together.
+**Not shared:** inventories (each keeps their own). A key used or a lever pulled by one player shows up
+for the other only after that area reloads (running gimmicks follow their own state).
 
 ---
 
 ## Русский
 
-**Что умеет:**
-- **Напарник в вашем мире:** полноценный персонаж в своём костюме, со всеми анимациями, оружием в
-  руках, ником и пингом над головой, вспышками выстрелов, звуками оружия и фонариком.
-- **Общие враги:** каждым врагом управляет тот игрок, к которому он ближе, поэтому враги охотятся,
-  хватают и ранят вас обоих. Второй игрок видит того же врага движение в движение, и его попадания
-  засчитываются.
-- **Общие двери и предметы:** дверь, которую толкнул напарник, открывается и у вас; предмет, который
-  он подобрал, исчезает и у вас.
-- **Телепорт к напарнику** (в пределах главы) и надпись на экране, если вы в разных главах.
+**Что синхронизируется:**
+- **Напарник в вашем мире:** персонаж в своём костюме со всеми анимациями, оружием, вспышками
+  выстрелов, звуками оружия, фонариком; над головой ник, здоровье в % и пинг.
+- **Враги:** каждым врагом управляет тот, к кому он ближе, — враги нападают на обоих; попадания
+  обоих засчитываются; второй игрок видит того же врага движение в движение.
+- **Двери:** толкнули дверь — она открывается и у напарника.
+- **Предметы:** подобранный предмет исчезает и у напарника (инвентари у каждого свои).
+- **Сюжет (экспериментально):** шаги сюжетных потоков главы (то, что запускает события) у одного
+  повторяются у другого; при подключении гость получает весь прогресс главы хоста.
+- **Главы:** если хост ушёл в другую главу, гость через 5 секунд переходит туда же (с отсчётом на
+  экране); есть и кнопка «Go to partner's chapter».
+- **Замки, загадки, переключатели:** их состояние передаётся напарнику и применяется, когда этот
+  участок у него загрузится (см. ограничения).
+- **Катсцены:** пока у кого-то из вас катсцена, напарник скрыт и не мешает.
 
-**Пока не общее:** запертые на ключ двери (ключ одного игрока не открывает дверь у другого),
-события, катсцены и сюжет. Каждый играет в своей копии игры со своим инвентарём — загружайте одну и
-ту же главу (лучше одно и то же сохранение).
+### Установка (оба игрока)
+1. **REFramework**: скачайте `REFramework.zip` (текущая ночная сборка) с
+   https://github.com/praydog/REFramework-nightly/releases и положите **только** `dinput8.dll` в папку
+   игры (где `re9.exe`).
+2. Распакуйте архив мода в папку игры (папка `reframework` сольётся с существующей).
+3. Версия мода у обоих должна совпадать.
 
-### Установка
-1. Установите **REFramework** — текущую ночную сборку (`REFramework.zip` с
-   https://github.com/praydog/REFramework-nightly/releases). Скопируйте из архива только `dinput8.dll`
-   в папку игры (там, где `re9.exe`).
-2. Распакуйте этот архив в папку игры: папка `reframework` сольётся с уже существующей.
-   - `reframework/autorun/re9coop_main.lua` — сам мод;
-   - `reframework/plugins/re9coop_net.dll` — сетевая часть (Steam).
-3. Оба игрока ставят одну и ту же версию мода.
+### Как подключиться к лобби
+Меню мода: в игре нажмите **Insert** → *Script Generated UI* → **RE9 Co-op (online)**.
 
-### Как играть вместе
-1. Оба запускают игру через Steam и загружают **одну и ту же главу** (лучше одинаковое сохранение).
-2. Откройте меню REFramework клавишей **Insert** → *Script Generated UI* → **RE9 Co-op (online)**.
-3. Хост нажимает **Host a co-op session**, затем **Invite friends (Steam overlay)** и приглашает друга.
-4. Друг принимает приглашение в Steam — мод сам подключится. Либо в том же меню друг жмёт
-   **Refresh friends** → **Join <имя хоста>**, либо вводит *Lobby ID* и жмёт **Join by ID**.
-5. Через пару секунд напарник появится рядом. Если вы далеко друг от друга — **Teleport to partner**.
+**Хост (тот, чей мир и сюжет главные):**
+1. Загрузите сохранение.
+2. Если друг не у вас в друзьях Steam — поставьте галочку **Anyone with the ID can join**.
+3. Нажмите **Host a co-op session**.
+4. Пригласите друга одним из способов:
+   - **Invite friends (Steam overlay)** → выберите друга → «Пригласить»;
+   - или **Copy lobby ID** и отправьте этот номер другу в любой мессенджер.
 
-**Self test** (флажок в меню) — проверка без друга: ваш персонаж повторяется «эхом» перед вами с
-задержкой 150 мс, через тот же сетевой путь, что и у напарника.
+**Гость (друг):**
+1. Загрузите своё сохранение (лучше ту же главу; если другая — мод сам переведёт вас к хосту).
+2. Подключитесь одним из способов:
+   - примите приглашение в чате Steam (Shift+Tab) — мод подключится сам;
+   - или в меню мода **Refresh friends** → **Join <имя хоста>**;
+   - или вставьте номер в поле **Lobby ID** и нажмите **Join by ID**.
+3. Через пару секунд вы увидите друг друга. Если далеко — **Teleport to partner**.
+
+Если не подключается:
+- «not a RE9 co-op lobby» / «host runs another mod version» — у вас разные версии мода;
+- друг не видит вашу сессию в списке — включите «Anyone with the ID can join» и подключайтесь по ID;
+- приглашения Steam работают только при включённом оверлее Steam;
+- проброс портов не нужен (соединение идёт через сеть Steam).
+
+**Self test** (флажок в меню) — проверка без друга: ваш персонаж повторяется «эхом» перед вами.
 
 ### Удаление
 Удалите `reframework/autorun/re9coop_main.lua`, `reframework/plugins/re9coop_net.dll` и
@@ -81,12 +101,16 @@ inventory; load the same chapter (ideally the same save) to play together.
   hands it keeps its health. Expect ~300–400 kbit/s each way with enemies.
 - Doors: a door push (`GmDoorV3.addForce`) is replayed on the partner's copy of the same door.
   Pickups: `ItemCore.notifyPickupped` here despawns the partner's copy through its `ItemContext`.
+- Gimmicks: ~700 `GimmickContext`s per chapter are fingerprinted a slice per frame (their bool / int
+  fields); changes travel as field lists and are applied with the game's own `store()` / `restore()`.
+  The lobby owner sends them all on join. Gimmick global bit flags are OR-ed.
+- Story: `LevelFlowManager.setProgressiveNumber` is hooked; the partner replays the step with
+  `requestChangeProgressiveNumber`. Chapter jumps use `MainGameFlowManager.setOverrideNextJumpScene` +
+  `LevelFlowManager.requestGameJump`.
 
 ## Roadmap
-1. Key-locked doors and key items shared.
-2. Following the host into the next chapter automatically.
-3. Cutscenes: hide the partner and keep both players in step.
-4. Later: Leon as the partner in Grace's chapters (and the reverse), downed/revive.
+1. Live sharing of key items, levers and puzzles that are running (per gimmick kind, like door pushes).
+2. Leon as the partner in Grace's chapters (and the reverse), downed/revive.
 
 ## Known limitations
 - Both players need the same chapter loaded; the partner is hidden while you're in different areas.
@@ -94,6 +118,8 @@ inventory; load the same chapter (ideally the same save) to play together.
   assist may still pick it).
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Items dropped at runtime (e.g. by enemies) aren't shared.
+- A key, lever or puzzle used by one player takes effect for the other only once that area reloads.
+- Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
   the first through the network code). The first real two-PC session may still find problems — please
   send `re2_framework_log.txt` from both games.
