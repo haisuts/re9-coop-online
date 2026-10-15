@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.9.0"
+local VERSION = "0.9.1"
 local PROTO = 8
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "

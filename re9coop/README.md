@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.9.0
+# RE9 Co-op (online) — v0.9.1
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -73,11 +73,15 @@ from it is used.
   повторяются у другого; при подключении гость получает весь прогресс главы хоста.
 - **Главы:** если хост ушёл в другую главу, гость через 5 секунд переходит туда же (с отсчётом на
   экране); есть и кнопка «Go to partner's chapter».
-- **Замки, ключи, загадки, переключатели — сразу:** замок, открытый одним (ключом или иначе),
-  тут же открывается и у другого — без сцены с его персонажем; предметы, вставленные в загадку,
+- **Замки, ключи, загадки, переключатели — сразу:** замок, открытый одним (ключом, жетоном, деталью),
+  тут же открывается и у другого — без сцены с его персонажем и не отнимая у него управление; предметы, вставленные в загадку,
   засчитываются обоим; положения переключателей и другие состояния подтягиваются, когда напарник
-  рядом с ними. То, что у напарника ещё не загружено, применится при загрузке участка. Загадку может
-  решить любой из двоих — решение гостя засчитывается в игре хоста так же.
+  рядом с ними. Загадку может решить любой из двоих — решение гостя засчитывается в игре хоста так же.
+  Исключения: несколько загадок в больнице (Chap3_02 / 3_20: штриховка карандашом, панели в четыре
+  шага, мониторы и радио) и одна в Chap3_01 выглядят решёнными у напарника только после загрузки игры
+  (сохранение или «продолжить»); то, что они открывают (сюжет, двери, флаги), передаётся сразу. На
+  двери «солнце / луна / звезда» напарник может не видеть уже вставленные эмблемы — открывается она
+  правильно.
 - **Рецепты крафта — обоим:** рецепт, открытый одним (записка с рецептом, анализ пробы крови на
   лазерном микроскопе), открывается и у напарника (с пометкой «новое»).
 - **Не встал — очнулся рядом с напарником:** если вас не подняли за 30 секунд, вы приходите в себя
@@ -100,8 +104,8 @@ from it is used.
 - **Убитые враги:** враг, убитый одним игроком, мёртв и в игре второго (не «живой труп»).
 - **Без сознания вместо смерти:** пока напарник рядом (та же глава, на связи), смертельный удар
   оставляет вас «при смерти»: двигаться и стрелять нельзя, враги больше не ранят. Напарник
-  **приседает рядом с вами 2,5 секунды** — вы встаёте с третью здоровья. Если за 90 секунд никто не
-  помог, напарник отключился или без сознания оба — обычный экран смерти.
+  **приседает рядом с вами 2,5 секунды** — вы встаёте с третью здоровья. Если напарник отключился или
+  без сознания оба — обычный экран смерти.
 - **Захват:** если вас схватил враг, напарник освобождает вас, **выстрелив в этого врага или ударив
   его ножом/пинком рядом с вами** — захват сразу прерывается.
 - **Оружие и ключевые предметы — каждому:** оружие, ключевые предметы, файлы, карты, улучшения,
@@ -181,6 +185,10 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   / "I stayed" exchange and the resend, a real cutscene skipped from the partner's message and our
   skip sent (both ways), the partner's dot on the game's map and the edge marker, an enemy-style drop
   made in the partner's game and taken away by their pickup, reconnecting (net plugin stubbed).
+- v0.9.1: locks solved for real (a padlock, three security-tag doors, the sun / moon / star door)
+  and played back as the partner: every field of the lock matches, the partner's controls stay free;
+  the heart / lung slots again; every puzzle type of every loadable chapter checked for whether its
+  state follows the partner's data.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
@@ -238,14 +246,18 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
 - Both players need the same chapter loaded; the partner is hidden while you're in different areas.
 - If both players take the same thing out of the item box at the same moment, the host keeps it and
   the guest's copy is taken from their hands (if it's still there as it came out).
-- After a game over each game goes back to its own last checkpoint; use "Go to partner's chapter" /
-  "Teleport to partner" to meet up again.
+- After a game over the player who died starts from their own last save; the partner's chapter state
+  is sent to them, but they still have to walk (or "Teleport to partner") back to them.
 - The guest's co-op save is an autosave: it takes the place of the guest's oldest autosave, like the
   game's own autosaves do.
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
-- Items dropped at runtime (e.g. by enemies) aren't shared.
-- A gimmick that reacts only to the solving player's own scene (not to a lock trigger, an item slot,
-  a safe or container, or its data) catches up for the partner when that area reloads.
+- Of the items the game makes during play, only enemy drops are shared; anything else it spawns is
+  each player's own.
+- A few puzzles in the hospital (Chap3_02 / 3_20: the pencil rubbing, the four-step panels, the
+  monitors and radios) and one in Chap3_01 show their solved state in the partner's game only after
+  the game loads (a save or a continue); what they unlock (story, doors, flags) is shared at once.
+  On the sun / moon / star door the partner may not see the emblems already put in (the door still
+  opens right).
 - A boss (and any enemy) attacks only the player who runs it; the other player can't be hurt by it.
 - Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying

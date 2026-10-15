@@ -459,6 +459,48 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
   of a load error) and `rig_enable` called before its local was declared (the puppet's torch stayed on
   when the partner was hidden).
 
+## v0.9.1 (2026-10-15) — puzzles checked one by one
+
+Method: a lock or puzzle solved for real on one side (the game's item screen through the dev bridge:
+item given, Interact fired, cursor moved to the item's cell, F), the mod's messages recorded and the
+gimmick's state snapshotted (data + every component's plain fields); then the recording played back
+on a fresh game as the partner and the same snapshot compared field by field
+(tools/solve_gimmick.py, scratchpad gm_snap / partner_check). Then a census of every puzzle type in
+every loadable chapter with a "does the runtime follow its data" test (tools/puzzle_probe.lua,
+puzzle_sweep.py, puzzle_report.py).
+
+- BUG FIXED, locks never opened live for the partner (since v0.6.1): the partner's state messages
+  (UnlockCount 1, IsLock false) arrive before the unlock trigger; lock_open() read the data, took the
+  lock for open and skipped the trigger, while GmLockV2._IsCurrLock stayed true and the lock wrote its
+  data back. Now: open = `_IsCurrLock` false; an unlock trigger waits 0.5 s after the partner's data
+  was written (data written in the same frame made the lock drop the unlock), the data after it waits
+  1 s (gim.hold); the count goes one down before the trigger (the lock adds it again on its next
+  update: 1 -> 2 otherwise, and a two-key lock would open on one). Verified on 4 real solves: a
+  padlock (Gm02_006, unlocks on GmUseKeyItemSuccess) and three security-tag doors (Gm02_012 / 021 /
+  027, unlock on TurnOff): every changed field matches the solver except the item screen's own.
+- BUG FIXED, item use replayed into puzzles took the partner's controls: Gm99_108 (pencil rubbing)
+  replayed UseKeyItem_Success went to step 10 with "move the pencil / shade" prompts on the partner.
+  Item use is now replayed only on gimmicks with item slots (GmMultipleUseKeyItem: heart / lung,
+  verified again); locks open on their own _UnlockParams triggers (GmUseKeyItemSuccess, TurnOff,
+  SetMoon/Sun/Star, Unlock, MotionEnd, SuccessEnd, SuccessTag, UseKeyItem_Success(_Lv2)). A miss in
+  the trigger index rebuilds it for any name replayed so far.
+- Lock unlock triggers in Chap3_02 (28 locks): see `_UnlockParams._TriggerName`; required items are on
+  the KeyItemInventory triggers (`_TargetItemIDStrs`, System.String objects: ToString), e.g. Gm02_006
+  it99_50_006, Gm02_012 it60_00_055/068/075, Gm02_016 sun it60_00_048 moon 049 star 050 (bits 4/2/8).
+- Gm02_016 (sun / moon / star) is the lock that ends Grace's part of Chap3_02 (into Chap3_10, Leon).
+  Partner: data (_SetType, ProgressIndex, UnlockCount) follows; the panel's runtime _SetType doesn't
+  (set_SetItemType(data) sets it, unverified on screen).
+- GmMotionV2 follows its data live (_Index written -> the motion plays to the end).
+- Puzzle census, runtime NOT following data (state only; the partner's copy catches up when the game
+  loads): Gm99_081V2, 098, 099, 101, 102, 105, 108, 110 (the hospital, Chap3_02 / 3_20), Gm19_066
+  (Chap3_01). Their progress (story steps, global flags, locks) is shared live. GmItemInstallation
+  (Chap3_01, 4_1020, 5_02, GetItem) also stays, which is right: the key item stays for the partner.
+- Gimmicks never stream out within a chapter (all 374 GimmickCores of Chap3_02 exist at once): "the
+  area reloads" means a load. The `.../stXX_YYY_Gimmick_Common/<Group>` folders report inactive while
+  their objects live; Folder.activate() does nothing there.
+- Warping straight into another room right after a load can drop the player through the world (to
+  y -469, then a game over): its collision isn't there yet.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
