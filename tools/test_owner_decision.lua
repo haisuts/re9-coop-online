@@ -20,6 +20,16 @@ local cases = {
     { false, true,     true,  1,    40,     false, "dead: never moves" },
     { nil,   true,     true,  40,   1,      true,  "dead and unassigned: arbiter" },
 }
+-- bosses: cur, together, dead, d_me, d_peer, here, there -> want
+local boss_cases = {
+    { nil,   true,  false, 10, 2,  true,  true,  false, "boss, new, nearer the guest: guest" },
+    { true,  true,  false, 30, 1,  true,  true,  true,  "boss, guest much nearer: stays with the arbiter" },
+    { false, true,  false, 1,  30, true,  true,  false, "boss, arbiter much nearer: stays with the guest" },
+    { true,  true,  false, 30, 1,  false, true,  false, "boss, arbiter's copy gone: guest" },
+    { false, true,  false, 1,  30, true,  false, true,  "boss, guest's copy gone: arbiter" },
+    { true,  true,  false, 30, 1,  false, false, true,  "boss, both gone: stays" },
+    { false, false, false, 1,  1,  true,  true,  true,  "boss, apart: arbiter" },
+}
 local fails = 0
 for i, c in ipairs(cases) do
     local got = owner_decision(c[1], c[2], c[3], c[4], c[5])
@@ -28,5 +38,13 @@ for i, c in ipairs(cases) do
         print(("FAIL %d %s: got %s"):format(i, c[7], tostring(got)))
     end
 end
-print(("%d/%d cases pass"):format(#cases - fails, #cases))
+for i, c in ipairs(boss_cases) do
+    local got = owner_decision(c[1], c[2], c[3], c[4], c[5], true, c[6], c[7])
+    if got ~= c[8] then
+        fails = fails + 1
+        print(("FAIL boss %d %s: got %s"):format(i, c[9], tostring(got)))
+    end
+end
+local total = #cases + #boss_cases
+print(("%d/%d cases pass"):format(total - fails, total))
 if fails > 0 then os.exit(1) end

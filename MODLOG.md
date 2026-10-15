@@ -364,6 +364,60 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
   is in use (step not None, or the box screen within 3 s) are sent now; box.known resets on scene
   change. Two chapter jumps after that: nothing sent.
 
+## v0.8.0 (2026-10-15) — puzzles either player solves, recipes, bosses
+
+- REFramework sometimes hangs at game start: log ends with "Locking PEB + loader locks" and a list of
+  "Suspending <tid>" lines, the window stays black, the bridge never answers. Kill and relaunch;
+  `tools/start_game.py` now retries the launch up to 3 times.
+- Laser microscope (Gm99_054, Chap3_02 f63b9e78 / fa05b693): using a blood sample (it60_00_064,
+  "Проба крови (денатурация)") fires KeyItemInventory UseKeyItem_Success + UseKeyItem_Success1, then
+  GmStructureData Gm99_054Start / PuzzleStart and a close-up molecule puzzle ("activate all atoms",
+  aim the cursor with raw mouse moves, F converts). Solving it fires GmStructureData Success1 and
+  unlocks crafting recipes (pistol ammo, hemolytic injector) — on the solver's side only.
+  - Recipes: `ItemManager._UnlockedCraftRecipeIDSet` (HashSet<app.CraftRecipeID>; CraftRecipeID is a
+    class with static instances like `recipe40_00_000_01`, ToString gives the name),
+    `unsealCraftRecipe(app.CraftRecipeID, System.Boolean)` (true: shows as new), `isSealCraftRecipe`,
+    `isNewArrivalCraftRecipe`, `_AcquireItem2UnsealCraftRecipeCatalog` (recipe files).
+  - Replaying UseKeyItem_Success on the partner's microscope started its puzzle there with nobody at
+    it. Close-up gimmicks carry `InteractActionFixCameraHolder` (locks don't, heart/lung Gm99_104
+    doesn't): key-item triggers of gimmicks with a fix-camera holder and no GmLockV2 aren't replayed.
+  - The partner's microscope, given the solver's data, shows _IsDone / _IsLock / GmMotionData
+    _IsLoopWait = true, and still opens its item screen when used: it isn't stuck.
+- Live "area reload" of one gimmick — `GmBase` explicit interface methods
+  `app.GimmickCore.IGimmickContextReceiver.finishGimmickContextReceiver()` then
+  `...setupGimmickContextReceiver(GimmickContext)` (context from `GimmickCore._Context`; finish clears
+  `GmBase._Context`) — runs without errors but breaks the gimmick: using the microscope afterwards hung
+  at StepType 1 with a dark screen. Not used.
+- Gimmick types with force methods (all of app.Gm*): Gm18_008(_02).forceGimmickEnd,
+  GmContainer.forceOpen/Reset, GmSafe.forceOpen/Reset, GmFragileSymbol.forceBroken/Reset,
+  GmElevator.forceRequet/forceRequestNextFloor/forceRequestDoor, Gm99_098.requestForceStart.
+- Enemy kinds (app.CharacterKindID): A players, B zombies and stalkers, C/D creatures, E/S/T/V/X/Y/Z
+  others. No boss flag in the data (EnemyContext has EliteStatus, RoleActionState). Boss / stalker
+  traits by type names: B800 (phases, retreat points, wander, door block — a stalker), B700 (battle
+  area), C100 (phase driver), C610 (phase attacks), D110 (weak points, stance, battle cycles, an HP
+  gauge configuration), D100 (stagger timer).
+- Bosses: kinds in `foes.bosses` keep their owner for the whole fight (a handover restarts the AI and
+  breaks phases); they only move when the owner's copy is gone and the other player still has one.
+- Chapter sweep with enemy kinds (20 chapters, no mod errors; Chap4_00 and Chap5_10 don't load
+  directly): one-of-a-kind enemies are B700 (Chap4_10/1020, 10000 HP, with 68 C700), C100 (Chap3_02,
+  Chap3_20, 6000 HP), C510 (Chap4_40), C900 (Chap4_50, with 4 C901), B032 and B052 (Chap3_40), B002.
+  D000 / D100 / D110 / C610 never showed up in a directly loadable chapter (story-only chapters).
+- Boss spawn controls live in their arena's folders (C100: six `app.Cp_C100SpawnParam` around
+  院長室前, `Chap3_02_CharacterSpawnParam_00/東エリア/院長室前まわり` and `..._InsanityOnly`). Folders:
+  `go:get_Folder()`, `get_Parent` up to "MainGame", `get_Child` / `get_Next` down; `Folder.activate()`
+  loads one. The six spawn params share the boss's context (InheritOtherObjectSpawnedContext): before
+  one of them spawns it, `CharacterManager.getSpawnDataRef(id)` is nil; `permitSpawn(true)` +
+  `requestSpawn()` (GUI update) spawns it.
+- BUG FIXED: `spawn_control()` cached a failed lookup as false for good, so an enemy whose spawn
+  control loaded after the enemy list was first read (every boss, and enemies of areas loaded later)
+  was never puppeted or spawned for the partner. Misses are looked up again after 1 s, hits after 5 s.
+- C100 spawns asleep (`GameObject.UpdateSelf` false) until its entrance; `puppetize` waited for it to
+  wake. Now the partner's copy is woken when the owner's copy is up (fresh state, spawned flag), then
+  puppeted. Test (one PC, loopback, C100 as the copy of zombie a87da8ab): woken and puppeted
+  automatically, drawn and warped; a direct addDamageHitPoint(120) and two real pistol shots went to
+  the owner's enemy (boss HP stayed 6000); ending the test gave the boss its AI back (it walked off).
+- Joint lists are capped at 255 (the count is a byte); C100 has 100, players 68 / 84.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

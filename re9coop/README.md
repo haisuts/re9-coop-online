@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.7.0
+# RE9 Co-op (online) — v0.8.0
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -20,6 +20,12 @@ from it is used.
   in the partner's game too, right away, without any scene for the partner's character; items placed
   into puzzle slots count for both; switch positions and other gimmick states follow as soon as the
   partner is near them. Gimmicks in areas the partner hasn't loaded take the state when they load.
+  Either player can solve a puzzle: the guest's solution counts in the host's game the same way.
+- **Crafting recipes for both**: a recipe one player unlocks (a recipe file, the blood analysis at the
+  laser microscope) is unlocked in the partner's game too, marked as new.
+- **Boss fights**: a boss is run by one player for the whole fight (the one nearer when it appears),
+  so its phases and attack patterns aren't broken by handing it back and forth. The other player sees
+  it move for move and their hits count. It only changes hands when its player leaves the fight.
 - **Cutscenes**: the partner is hidden while either of you is in one.
 - **Downed, not dead**: while your partner is with you, a hit that would kill you leaves you on your
   last breath instead — you can't move or shoot, enemies can't hurt you more — and your partner gets
@@ -59,7 +65,13 @@ from it is used.
 - **Замки, ключи, загадки, переключатели — сразу:** замок, открытый одним (ключом или иначе),
   тут же открывается и у другого — без сцены с его персонажем; предметы, вставленные в загадку,
   засчитываются обоим; положения переключателей и другие состояния подтягиваются, когда напарник
-  рядом с ними. То, что у напарника ещё не загружено, применится при загрузке участка.
+  рядом с ними. То, что у напарника ещё не загружено, применится при загрузке участка. Загадку может
+  решить любой из двоих — решение гостя засчитывается в игре хоста так же.
+- **Рецепты крафта — обоим:** рецепт, открытый одним (записка с рецептом, анализ пробы крови на
+  лазерном микроскопе), открывается и у напарника (с пометкой «новое»).
+- **Боссы:** босса весь бой ведёт один игрок (тот, кто был ближе, когда босс появился), поэтому его
+  фазы и атаки не ломаются от передачи туда-сюда. Второй видит его движение в движение, его попадания
+  засчитываются. Босс переходит к другому, только если его игрок ушёл из боя.
 - **Катсцены:** пока у кого-то из вас катсцена, напарник скрыт и не мешает.
 - **Убитые враги:** враг, убитый одним игроком, мёртв и в игре второго (не «живой труп»).
 - **Без сознания вместо смерти:** пока напарник рядом (та же глава, на связи), смертельный удар
@@ -137,7 +149,11 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   the story, so they weren't loaded directly.
 - Downed (a real zombie bite), revive, bleed-out game over; grab freed by the partner's hit and by
   their melee; the item box through the game's own box screen; key-locked gate opened for the partner.
-- Not yet: a real two-PC session, boss fights.
+- v0.8.0: the laser microscope (blood analysis puzzle) solved for real, then replayed as the partner:
+  the partner gets both recipes and can still use the microscope. A boss (the hospital's cp_C100,
+  6000 HP, 100 joints) as the partner's copy: woken and posed from the owner's data, real pistol hits
+  on it land on the owner's side, and it gets its AI back when it changes hands.
+- Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
 - `re9coop_net.dll` (REFramework plugin, C++): uses the game's own `steam_api64.dll` — a friends-only
@@ -155,7 +171,12 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   enemy through its own spawn control (enemies are identified by their scene GUID), switches off its
   think, lock-on and out-of-area drivers, warps it and writes the runner's skeleton over its
   animation. Damage dealt to such a copy is caught and sent to the runner. When an enemy changes
-  hands it keeps its health. Expect ~300–400 kbit/s each way with enemies.
+  hands it keeps its health. Bosses (cp_B700, C100, C510, C900, D100, D110, B052, C610) keep their
+  runner for the whole fight and always get their full skeleton; a boss that spawns asleep waiting for
+  its entrance is woken in the other game when the runner's is up. Expect ~300–400 kbit/s each way
+  with enemies.
+- Crafting recipes: `ItemManager._UnlockedCraftRecipeIDSet` is compared every 2 s; the names go to
+  the partner, whose game unlocks the missing ones with `unsealCraftRecipe`.
 - Doors: a door push (`GmDoorV3.addForce`) is replayed on the partner's copy of the same door.
   Pickups: `ItemCore.notifyPickupped` here despawns the partner's copy through its `ItemContext`.
 - Gimmicks: ~700 `GimmickContext`s per chapter are fingerprinted a slice per frame (their bool / int
@@ -181,9 +202,8 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   slot, empty or oldest).
 
 ## Roadmap
-1. Puzzles whose result only shows in the solving player's own scene may need that area reloaded for
-   the partner.
-2. Leon as the partner in Grace's chapters (and the reverse), downed/revive.
+1. Leon as the partner in Grace's chapters (and the reverse).
+2. Bosses attacking the player who doesn't run them.
 
 ## Known limitations
 - Both players need the same chapter loaded; the partner is hidden while you're in different areas.
@@ -194,8 +214,9 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   game's own autosaves do.
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Items dropped at runtime (e.g. by enemies) aren't shared.
-- A gimmick that reacts only to the solving player's own scene (not to a lock trigger or its data)
-  catches up for the partner when that area reloads.
+- A gimmick that reacts only to the solving player's own scene (not to a lock trigger, an item slot,
+  a safe or container, or its data) catches up for the partner when that area reloads.
+- A boss (and any enemy) attacks only the player who runs it; the other player can't be hurt by it.
 - Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
   the first through the network code). The first real two-PC session may still find problems — please

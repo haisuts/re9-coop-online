@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.7.0"
-local PROTO = 6
+local VERSION = "0.8.0"
+local PROTO = 7
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -48,6 +48,7 @@ local cfg = {
     save_with_host = true,    -- the guest's game autosaves whenever the host's game saves
     revive = true,            -- a lethal hit downs you while your partner is with you; they get you up
     pickups_for_both = false, -- ammo, healing and crafting items too: each player picks up their own
+    recipe_sync = true,       -- a crafting recipe one player unlocks is unlocked for both
     public_lobby = false,     -- anyone with the lobby ID can join (otherwise friends and invitees)
 }
 
@@ -101,11 +102,22 @@ local function say(fmt, ...)
     if #recent_log > 12 then table.remove(recent_log) end
 end
 
--- The elements of a managed array; now and then a call hands back something that isn't one.
+-- The elements of a managed array, or nil when it can't be read. Now and then REFramework hands an
+-- array over in a plain-object wrapper (one it made earlier for another object at that address); it
+-- is then read through System.Array. A nil must not be taken for "empty".
 local function elements(arr)
     if arr == nil then return {} end
     local ok, list = pcall(arr.get_elements, arr)
-    return ok and list or {}
+    if ok and list then return list end
+    local okn, n = pcall(arr.call, arr, "get_Length")
+    if not okn or type(n) ~= "number" then return nil end
+    local out = {}
+    for i = 0, n - 1 do
+        local okv, v = pcall(arr.call, arr, "GetValue(System.Int32)", i)
+        if not okv then return nil end
+        out[#out + 1] = v
+    end
+    return out
 end
 
 local function now()
@@ -310,7 +322,7 @@ local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
 local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
-local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26 }
+local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
@@ -519,7 +531,7 @@ function Puppet:build_step()
     self.loads = {}
     local by_name = {}
     local js = rtr:call("get_Joints")
-    for _, j in ipairs(elements(js)) do by_name[j:call("get_Name")] = j end
+    for _, j in ipairs(elements(js) or {}) do by_name[j:call("get_Name")] = j end
     self.jmap = {}
     for i, n in ipairs(self.appear.names) do self.jmap[i] = by_name[n] or false end
     self.j_root, self.j_hip = by_name["root"], by_name["Hip"]
@@ -839,6 +851,8 @@ local function on_ctrl(from, data)
         ext.saves_ctrl(from, kind, data)
     elseif (kind == MSG.REVIVE or kind == MSG.RESCUE) and ext.life_ctrl then
         ext.life_ctrl(from, kind, data)
+    elseif kind == MSG.RECIPES and ext.recipes_ctrl then
+        ext.recipes_ctrl(from, kind, data)
     end
 end
 
@@ -969,6 +983,12 @@ local foes = {
     -- arbiter
     next_arbitrate = 0, next_full_owners = 0,
     presence = {},         -- id -> { pos, dead, t } enemies the other player has spawned
+    -- kind -> true: run by one player for the whole fight (see owner_decision). Picked from the chapter
+    -- sweep (one of its kind in a chapter) and their own types: B700 (battle area), C100 (phase
+    -- driver), C510 (car throws, parries), C900 (slams, with C901 adds), D100 (rocket launcher,
+    -- sandstorm, phases), D110 (weak points, battle cycles), B052 (blood-fog core), C610 (phase attacks)
+    bosses = { cp_B700 = true, cp_C100 = true, cp_C510 = true, cp_C900 = true, cp_D100 = true, cp_D110 = true,
+        cp_B052 = true, cp_C610 = true },
     stats = { sent = 0, puppets = 0, owned = 0, dmg_sent = 0, dmg_applied = 0, handovers = 0 },
     -- one-PC test (dev bridge only): with the self test on, enemy `src` (ours) is sent through the
     -- loopback and what arrives drives enemy `dst` (theirs), so dst copies src 150 ms late; hits on dst
@@ -1021,12 +1041,16 @@ local function refresh_index(t_now)
     foes.index = idx
 end
 
+-- A spawn control loads with its area (a boss's with its arena), often after the enemy's context is
+-- indexed: a miss is looked up again a second later, a hit every 5 s (the area may have unloaded).
 local function spawn_control(e)
-    if e.ctl == nil then
+    local t = now()
+    if t >= (e.ctl_t or 0) then
         local sd = character_manager():call("getSpawnDataRef", e.ctx:call("get_ID"))
-        e.ctl = sd and sd:call("get_SpawnControl") or false
+        e.ctl = sd and sd:call("get_SpawnControl") or nil
+        e.ctl_t = t + (e.ctl and 5 or 1)
     end
-    return e.ctl or nil
+    return e.ctl
 end
 
 -- Our own calls on a spawn control (the suspend guard below lets these through).
@@ -1065,10 +1089,16 @@ enemies_reset = function(scene_alive)
 end
 
 -- Only after the spawn has completed with its AI on: turning AI off earlier leaves it asleep.
-local function puppetize(id, e)
+-- wake: the owner's copy is up. A boss spawns asleep and waits for its entrance; when the owner's
+-- game has it up and ours doesn't yet (its story a step behind), ours is woken and becomes a puppet.
+local function puppetize(id, e, wake)
     local ctl = spawn_control(e)
     local go = ctl and ctl:call("getSpawnInstance")
-    if go == nil or not ctl:call("get_HasCompletedSpawn") or not go:call("get_UpdateSelf") then return end
+    if go == nil or not ctl:call("get_HasCompletedSpawn") then return end
+    if not go:call("get_UpdateSelf") then
+        if wake then go:call("set_UpdateSelf", true) end
+        return
+    end
     local upd = e.ctx:call("get_CharacterUpdaterBase")
     if upd == nil then return end
     set_ai(upd, go, false)
@@ -1117,8 +1147,11 @@ local function enemy_joints(go, kind)
     local j = foes.joints[a]
     if j then return j end
     local js = go:call("get_Transform"):call("get_Joints")
-    if js == nil then return nil end
-    j = { list = js:get_elements(), names = {}, kind = kind }
+    local list = js and elements(js)
+    if list == nil then return nil end
+    -- the joint count travels as a byte; big creatures send their first 255 (the body, not the fingers)
+    if #list > 255 then list = { table.unpack(list, 1, 255) } end
+    j = { list = list, names = {}, kind = kind }
     for i, x in ipairs(j.list) do
         j.names[i] = x:call("get_Name")
         if j.names[i] == "Hip" then j.hip = x end
@@ -1149,7 +1182,9 @@ local function send_owned(t_now)
             local go = e.ctx:call("get_GameObject")
             if go then
                 local pos = go:call("get_Transform"):call("get_Position")
-                live[#live + 1] = { id = id, e = e, go = go, pos = pos, d = ppos and (pos - ppos):length() or 0 }
+                -- bosses first: they always get their full skeleton
+                local d = foes.bosses[e.kind] and -1 or ppos and (pos - ppos):length() or 0
+                live[#live + 1] = { id = id, e = e, go = go, pos = pos, d = d }
             end
         end
     end
@@ -1211,11 +1246,18 @@ local function send_owners(changes)
 end
 
 -- Who should run an enemy (true = the arbiter, false = the other player). cur: current owner or nil.
+-- boss: it keeps its owner for the whole fight (a handover restarts its AI, which breaks its phases);
+-- it only moves when the owner's copy is gone (here / there: spawned on the arbiter's / other side).
 -- Pure, so tools/test_owner_decision.lua can check it outside the game.
-local function owner_decision(cur, together, dead, dme, dpeer)
+local function owner_decision(cur, together, dead, dme, dpeer, boss, here, there)
     if not together then return true end
     if dead then
         if cur == nil then return true end
+        return cur
+    end
+    if boss and cur ~= nil then
+        if cur and not here and there then return false end
+        if not cur and here and not there then return true end
         return cur
     end
     if cur == nil then return dme <= dpeer end
@@ -1233,10 +1275,13 @@ local function arbitrate(t_now)
     local together = p ~= nil and p.chapter == me.chapter and ppos ~= nil
     local changes = {}
     local seen = {}
-    local function decide(id, pos, dead)
+    local function decide(id, pos, dead, kind, here)
         seen[id] = true
         local cur = foes.owner[id]
-        local want = owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0)
+        local pr = foes.presence[id]
+        local there = pr ~= nil and t_now - pr.t < 1.5
+        local want = owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0,
+            foes.bosses[kind] == true, here, there)
         if want ~= cur then
             set_owner(id, want)
             changes[#changes + 1] = { id, not want } -- sent from the guest's point of view
@@ -1245,11 +1290,11 @@ local function arbitrate(t_now)
     for id, e in pairs(foes.index) do
         if e.ctx:call("get_IsSpawn") then
             local go = e.ctx:call("get_GameObject")
-            if go then decide(id, go:call("get_Transform"):call("get_Position"), e.ctx:call("get_IsDead")) end
+            if go then decide(id, go:call("get_Transform"):call("get_Position"), e.ctx:call("get_IsDead"), e.kind, true) end
         end
     end
     for id, pr in pairs(foes.presence) do
-        if not seen[id] and t_now - pr.t < 1.5 then decide(id, pr.pos, pr.dead) end
+        if not seen[id] and t_now - pr.t < 1.5 then decide(id, pr.pos, pr.dead, foes.index[id] and foes.index[id].kind, false) end
     end
     -- a full list now and then, in case something was missed
     if t_now >= foes.next_full_owners then
@@ -1443,8 +1488,10 @@ local function enemies_tick(t_now)
         if considered and e.ctx:call("get_IsSpawn") then
             if foes.owner[id] == nil and foes.test == nil then foes.owner[id] = true end
             if foes.owner[id] == false and not e.ctx:call("get_IsDead") then
-                if foes.puppets[id] == nil then puppetize(id, e) end
                 local st = foes.states[id]
+                if foes.puppets[id] == nil then
+                    puppetize(id, e, st ~= nil and t_now - st.last < 1.0 and st.flags & F_SPAWNED ~= 0)
+                end
                 if st == nil or t_now - st.last > 3 then
                     e.orphan_since = e.orphan_since or t_now
                     if t_now - e.orphan_since > 3 then
@@ -1489,7 +1536,7 @@ local function build_jmap(pup)
     end
     local by = {}
     local js = pup.go:call("get_Transform"):call("get_Joints")
-    for _, j in ipairs(elements(js)) do by[j:call("get_Name")] = j end
+    for _, j in ipairs(elements(js) or {}) do by[j:call("get_Name")] = j end
     pup.jmap = {}
     for i, n in ipairs(names) do pup.jmap[i] = by[n] or false end
     pup.j_hip = by["Hip"]
@@ -1778,6 +1825,10 @@ end
 -- partner's copy of that gimmick too (InteractTrigger.onProcessEvent): the gimmick runs its own
 -- reaction (the lock opens, the slot takes the item) with no player action there. Player input
 -- triggers ("Interact"...) are never replayed.
+-- Puzzles that hand out their result in the solver's own scene (a safe or a container opened, with the
+-- items inside): when the partner's data says one got done, ours is finished the game's way too
+-- (GmSafe / GmContainer.forceOpen: it opens and drops its own copy of the items). Collectibles
+-- (GmFragileSymbol: breakable symbols counted for achievements) are each player's own: not shared.
 -- All of this is applied inside the game's GUI update (see the item box section). On joining, the
 -- lobby owner sends every gimmick's state once. The gimmick global bit flags are OR-ed.
 local gim, gimmicks_late
@@ -1789,6 +1840,9 @@ local GIMMICK_SKIP_TYPES = {
 }
 local GIMMICK_PER_FRAME = 60
 local T_BOOL, T_INT = 1, 2
+local PERSONAL_DATA = "app.structure.GmFragileSymbolData" -- collectibles: each player breaks their own
+local T_BASE_DATA = "app.structure.GmBaseData"
+local FINISHERS = { { sdk.typeof("app.GmSafe"), "forceOpen" }, { sdk.typeof("app.GmContainer"), "forceOpen" } }
 
 gim = {
     fields = {},          -- structure type name -> { {name, tag}, ... } (logical fields only)
@@ -1846,7 +1900,9 @@ local function gimmick_state(gc)
     local save = gc:call("store")
     local arr = save and save:get_field("_StructureDatas")
     local entries, parts = {}, {}
-    for _, x in ipairs(elements(arr)) do
+    local list = elements(arr)
+    if list == nil then error("unreadable") end -- skipped this time, not taken for a change
+    for _, x in ipairs(list) do
         local tname, fields = logical_fields(x)
         for _, fd in ipairs(fields) do
             local ok, v = pcall(x.get_field, x, fd[1])
@@ -1871,7 +1927,7 @@ local function gimmick_contexts(t_now)
     if gim.contexts == nil or t_now >= gim.contexts_t or gim.chapter ~= me.chapter then
         local gm = gimmick_manager()
         local arr = gm and gm:get_field("_GimmickContextCache")
-        gim.contexts = elements(arr)
+        gim.contexts = elements(arr) or gim.contexts or {}
         gim.contexts_t, gim.chapter = t_now + 10, me.chapter
         gim.ids, gim.by_id = {}, {}
         for _, gc in ipairs(gim.contexts) do
@@ -1906,7 +1962,9 @@ local function gimmick_scan(t_now)
                 -- a gimmick that is running here rewrites its data from its own state right after we
                 -- restore the partner's; that is not a change of ours, so it isn't sent back
                 local echo = t_now - (gim.applied_at[id] or -10) < 3
-                if old ~= nil and old ~= sig and not echo and #entries > 0 and t_now - (gim.sent_at[id] or -10) > 0.5 and #gim.out < 64 then
+                local personal = false
+                for _, e in ipairs(entries) do if e[1] == PERSONAL_DATA then personal = true break end end
+                if old ~= nil and old ~= sig and not echo and not personal and #entries > 0 and t_now - (gim.sent_at[id] or -10) > 0.5 and #gim.out < 64 then
                     gim.sent_at[id] = t_now
                     gim.out[#gim.out + 1] = pack_gimmick(id, entries, false)
                 end
@@ -1926,6 +1984,7 @@ local function apply_gimmick(data)
         want[tname] = want[tname] or {}
         want[tname][fname] = tag == T_BOOL and (v ~= 0) or v
     end
+    if want[PERSONAL_DATA] then return end
     gimmick_contexts(now())
     local gc = gim.by_id[id]
     if gc == nil or (world.doors[id] and not full) then return end
@@ -1934,6 +1993,27 @@ local function apply_gimmick(data)
     local count = list and list:call("get_Count") or 0
     local changed = false
     gim.applying = true
+    -- done there, not here: a safe / container is opened the game's way first
+    if want[T_BASE_DATA] and want[T_BASE_DATA]._IsDone == true then
+        for i = 0, count - 1 do
+            local x = list:call("get_Item", i)
+            if x and x:get_type_definition():get_full_name() == T_BASE_DATA and x:get_field("_IsDone") == false then
+                local body = gc:call("get_BodyGameObject")
+                for _, f in ipairs(FINISHERS) do
+                    local comp = body and body:call("getComponent(System.Type)", f[1])
+                    if comp and pcall(comp.call, comp, f[2]) then
+                        -- its own opening sets its data (and drops its items): ours to write isn't needed,
+                        -- and the partner's drop flags would tell it the items are out already
+                        gim.applying = false
+                        gim.applied_at[id] = now()
+                        gim.stats.finished = (gim.stats.finished or 0) + 1
+                        return
+                    end
+                end
+                break
+            end
+        end
+    end
     for i = 0, count - 1 do
         local x = list:call("get_Item", i)
         local w = x and want[x:get_type_definition():get_full_name()]
@@ -1968,6 +2048,7 @@ end
 
 local TYPE_KEY_HOLDER = sdk.typeof("app.InteractTriggerKeyItemInventoryHolder")
 local TYPE_LOCK = sdk.typeof("app.GmLockV2")
+local TYPE_FIX_CAMERA = sdk.typeof("app.InteractActionFixCameraHolder")
 local TYPE_CORE = sdk.typeof("app.GimmickCore")
 local M_TRIGGER_PROCESS = sdk.find_type_definition("app.InteractTrigger"):get_method("onProcessEvent(via.GameObject)")
 local SIG_TRIGGER_PROCESS = "onProcessEvent(via.GameObject)"
@@ -1986,7 +2067,8 @@ local function trigger_index(t_now, force)
     local function add(go, want)
         local core = go and go:call("getComponent(System.Type)", TYPE_CORE)
         local ok, id = pcall(function() return core:call("get_ContextID"):call("ToString") end)
-        if not ok or not id then return end
+        -- right after a load the gimmicks' IDs aren't assigned yet (all zeros): index them later
+        if not ok or not id or id:find("^00000000%-0000") then return end
         local lock = go:call("getComponent(System.Type)", TYPE_LOCK)
         -- now and then get_Components hands back something that isn't an array
         local okc, comps = pcall(function() return go:call("get_Components"):get_elements() end)
@@ -2001,7 +2083,16 @@ local function trigger_index(t_now, force)
             end
         end
     end
-    for _, h in ipairs(world.scene_components(TYPE_KEY_HOLDER)) do add(h:call("get_GameObject"), key_outcome) end
+    for _, h in ipairs(world.scene_components(TYPE_KEY_HOLDER)) do
+        -- an item used on a close-up puzzle (the microscope) starts that puzzle: replayed on the
+        -- partner's side it starts there with nobody at it and the gimmick is stuck; its outcome
+        -- comes with the state sync instead
+        local go = h:call("get_GameObject")
+        local okf, close_up = pcall(function()
+            return go:call("getComponent(System.Type)", TYPE_FIX_CAMERA) ~= nil and go:call("getComponent(System.Type)", TYPE_LOCK) == nil
+        end)
+        if not (okf and close_up) then add(go, key_outcome) end
+    end
     for _, lock in ipairs(world.scene_components(TYPE_LOCK)) do
         local names = {}
         local okp, params = pcall(function() return lock:get_field("_UnlockParams"):get_elements() end)
@@ -2218,7 +2309,7 @@ local function progress_list()
     local n = d and d:get_field("_count") or 0
     local out = {}
     if entries then
-        for i, e in ipairs(elements(entries)) do
+        for i, e in ipairs(elements(entries) or {}) do
             if i > n then break end
             local h = e:get_field("hashCode")
             if h and h >= 0 then out[e:get_field("key")] = e:get_field("value") end
@@ -2388,7 +2479,7 @@ local function box_inventories()
     local n = d and d:get_field("_count") or 0
     local out = {}
     if entries == nil then return out end
-    for i, e in ipairs(elements(entries)) do
+    for i, e in ipairs(elements(entries) or {}) do
         if i > n then break end
         local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
         local k = inv and inv:get_field("_InventoryKey")
@@ -2410,7 +2501,7 @@ local function panel_entry(st)
     if not name then return nil end
     local loads = {}
     local li = st:call("get_LoadingItems")
-    for _, c in ipairs(elements(li)) do
+    for _, c in ipairs(elements(li) or {}) do
         local ad = c:get_field("_AmountData")
         local an, as = ad and ad:get_field("_ItemID"), ad and ad:get_field("_Stock")
         if an and as and as > 0 then loads[#loads + 1] = an .. ":" .. as end
@@ -2425,8 +2516,10 @@ local function ident(e) return e:match("^[^@]*") end
 -- { {e = entry, id = ident, key = PanelKey}, ... } and { ident -> count }
 local function read_box(inv)
     local list, counts = {}, {}
-    local sts = inv:call("getPanelStates")
-    for _, st in ipairs(elements(sts)) do
+    local states = elements(inv:call("getPanelStates"))
+    -- an unreadable box must not look empty (that would take everything out of the partner's box)
+    if states == nil then error("unreadable box") end
+    for _, st in ipairs(states) do
         local e = panel_entry(st)
         if e then
             local id = ident(e)
@@ -2607,9 +2700,13 @@ box.late = function(t_now)
                 else
                     ok, err = pcall(apply_ops, inv, m.ops)
                 end
-                if not ok then say("box error: %s", tostring(err)) end
-                local _, counts = read_box(inv)
-                box.known[m.key] = counts
+                if not ok and tostring(err):find("unreadable", 1, true) then
+                    box.queue[#box.queue + 1] = m -- nothing was applied: next time
+                else
+                    if not ok then say("box error: %s", tostring(err)) end
+                    local _, counts = read_box(inv)
+                    box.known[m.key] = counts
+                end
             end
         end
     end
@@ -2650,11 +2747,99 @@ if M_GUI_UPDATE then
             ok, err = pcall(ext.life_gui)
             if not ok then say("grab error: %s", tostring(err)) end
         end
+        if ext.recipes_gui then
+            ok, err = pcall(ext.recipes_gui)
+            if not ok then say("recipe error: %s", tostring(err)) end
+        end
     end, nil)
 end
 
 -- dev
 box.read_box, box.box_inventories, box.pack_box = read_box, box_inventories, pack_box
+end
+
+-------------------------------------------------------------------------------------------------
+-- crafting recipes
+-------------------------------------------------------------------------------------------------
+-- A recipe one player unlocks (a recipe file, the microscope's blood analysis) is unlocked for both.
+-- The analysis only runs on the solver's side, and the partner's microscope then shows it done, so
+-- the partner could never get those recipes. Each game sends the names of its unlocked recipes when
+-- that list grows (and once to a partner who shows up); the other unlocks the ones it lacks, inside
+-- the game's GUI update.
+do
+local T_RECIPE_ID = sdk.find_type_definition("app.CraftRecipeID")
+local SIG_UNSEAL = "unsealCraftRecipe(app.CraftRecipeID, System.Boolean)"
+local recipes = { n = -1, t = 0, peer = nil, pending = nil, stats = { sent = 0, applied = 0 } }
+ext.recipes = recipes
+
+local function recipe_set()
+    local im = sdk.get_managed_singleton("app.ItemManager")
+    return im, im and im:get_field("_UnlockedCraftRecipeIDSet")
+end
+
+local function recipe_names(set)
+    local out = {}
+    local en = set:call("GetEnumerator")
+    while en:call("MoveNext") do
+        local v = en:call("get_Current")
+        local name = v and v:call("ToString")
+        if name then out[#out + 1] = name end
+    end
+    return out
+end
+
+ext.recipes_late = function(t_now)
+    if not world_shared() or not cfg.recipe_sync or t_now < recipes.t then return end
+    recipes.t = t_now + 2
+    local _, set = recipe_set()
+    if set == nil then return end
+    local n = set:call("get_Count")
+    local partner = partner_to_follow and partner_to_follow()
+    local pid = partner and partner.id
+    if n == recipes.n and pid == recipes.peer then return end
+    recipes.n, recipes.peer = n, pid
+    if n == 0 or pid == nil then return end
+    local t = { "" }
+    local count = 0
+    for _, name in ipairs(recipe_names(set)) do
+        if count < 1000 then t[#t + 1] = string.pack("<s1", name) count = count + 1 end
+    end
+    t[1] = string.pack("<BH", MSG.RECIPES, count)
+    send_ctrl(table.concat(t))
+    recipes.stats.sent = recipes.stats.sent + 1
+end
+
+ext.recipes_ctrl = function(_, _, data)
+    if not world_shared() or not cfg.recipe_sync then return end
+    local _, n, pos = string.unpack("<BH", data)
+    local names = {}
+    for _ = 1, n do
+        local name
+        name, pos = string.unpack("<s1", data, pos)
+        names[#names + 1] = name
+    end
+    recipes.pending = names
+end
+
+ext.recipes_gui = function()
+    local names = recipes.pending
+    if names == nil then return end
+    recipes.pending = nil
+    local im, set = recipe_set()
+    if set == nil then return end
+    local have = {}
+    for _, name in ipairs(recipe_names(set)) do have[name] = true end
+    local added = 0
+    for _, name in ipairs(names) do
+        local f = not have[name] and T_RECIPE_ID:get_field(name)
+        local id = f and f:get_data(nil)
+        if id and pcall(im.call, im, SIG_UNSEAL, id, true) then added = added + 1 end
+    end
+    if added > 0 then
+        recipes.stats.applied = recipes.stats.applied + added
+        say("%d crafting recipe(s) from your partner", added)
+    end
+end
 end
 
 -------------------------------------------------------------------------------------------------
@@ -2685,7 +2870,7 @@ local function slot_of_serial(serial)
     local d = ssm and ssm:get_field("_SaveSlotInfoDict")
     local entries = d and d:get_field("_entries")
     local n = d and d:get_field("_count") or 0
-    for i, e in ipairs(elements(entries)) do
+    for i, e in ipairs(elements(entries) or {}) do
         if i > n then break end
         local v = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
         local k = v and e:get_field("key")
@@ -3188,6 +3373,8 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("story error: %s", tostring(err)) end
     ok, err = pcall(saves.late, t_now)
     if not ok then say("save error: %s", tostring(err)) end
+    ok, err = pcall(ext.recipes_late, t_now)
+    if not ok then say("recipe error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
@@ -3329,6 +3516,7 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Share enemies (both players need it on)", cfg.enemy_sync); if c then cfg.enemy_sync, changed = v, true end
     c, v = imgui.checkbox("Share doors and pickups", cfg.world_sync); if c then cfg.world_sync, changed = v, true end
     c, v = imgui.checkbox("Share locks, puzzles and switches", cfg.gimmick_sync); if c then cfg.gimmick_sync, changed = v, true end
+    c, v = imgui.checkbox("Share crafting recipes", cfg.recipe_sync); if c then cfg.recipe_sync, changed = v, true end
     c, v = imgui.checkbox("Share story progress (experimental)", cfg.story_sync); if c then cfg.story_sync, changed = v, true end
     c, v = imgui.checkbox("Follow the host to new chapters (guest)", cfg.follow_host); if c then cfg.follow_host, changed = v, true end
     c, v = imgui.checkbox("One item box for both players", cfg.box_sync); if c then cfg.box_sync, changed = v, true end
@@ -3357,6 +3545,7 @@ end
 _G.re9coop = { peers = function() return peers end, me = me, set_loopback = set_loopback, cfg = cfg, foes = foes,
     teleport_to_partner = teleport_to_partner, world = world, gim = gim, story = story,
     go_to_partner_chapter = go_to_partner_chapter, box = box, saves = saves, gimmick_ctrl = gimmick_ctrl, ext = ext,
+    on_ctrl = on_ctrl,
     -- what every part of the mod sees in this chapter (for the chapter-by-chapter test)
     selftest = function()
         local function count(t) local n = 0 for _ in pairs(t or {}) do n = n + 1 end return n end

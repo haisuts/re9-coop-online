@@ -104,7 +104,10 @@ def main():
         time.sleep(10)
         rc, st = bridge("local r = _G.re9coop.selftest() "
                         "local l = sdk.get_managed_singleton('app.CharacterManager'):call('get_EnemyContextList') "
-                        "r.enemy_contexts = l and l:call('get_Count') return json.dump_string(r)")
+                        "r.enemy_contexts = l and l:call('get_Count') r.enemy_kinds = {} "
+                        "for i = 0, (l and l:call('get_Count') or 0) - 1 do "
+                        "local k = l:call('get_Item', i):call('get_KindID'):call('ToString') "
+                        "r.enemy_kinds[k] = (r.enemy_kinds[k] or 0) + 1 end return json.dump_string(r)")
         try:
             st = json.loads(json.loads(st)) if st.startswith('"') else st
         except Exception:

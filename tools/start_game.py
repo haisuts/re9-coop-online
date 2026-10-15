@@ -26,15 +26,21 @@ def drive(*cmds):
 
 
 def main():
-    subprocess.run(["taskkill", "/IM", "re9.exe", "/F"], capture_output=True)
-    time.sleep(3)
-    subprocess.run(["um", "win", "launch", "--steam", "3764200"], capture_output=True, shell=True)
-    t0 = time.time()
-    while time.time() - t0 < 120:
-        time.sleep(3)
-        rc, out = bridge("return 'up'", 5)
-        if rc == 0 and "up" in out:
+    for _ in range(3):  # REFramework sometimes hangs at startup with the game's threads suspended
+        subprocess.run(["taskkill", "/IM", "re9.exe", "/F"], capture_output=True)
+        time.sleep(5)
+        subprocess.run(["um", "win", "launch", "--steam", "3764200"], capture_output=True, shell=True)
+        t0 = time.time()
+        up = False
+        while time.time() - t0 < 150 and not up:
+            time.sleep(3)
+            rc, out = bridge("return 'up'", 5)
+            up = rc == 0 and "up" in out
+        if up:
             break
+    else:
+        print("bridge never came up")
+        return 1
     start = len(open(LOG, encoding="utf-8", errors="replace").read().splitlines())
     time.sleep(8)
     drive("key 0x2D", "sleep 500")  # close the REFramework menu

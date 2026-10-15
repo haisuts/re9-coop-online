@@ -157,8 +157,8 @@ re.on_pre_application_entry("UpdateBehavior", function()
 end)
 
 -- Save guard for tests: while reframework/data/re9coop_bridge/block_saves.flag holds "1", every save
--- request into a game slot (Auto / Game / by slot index or address) is skipped and listed in
--- dev.saves, so tests never write the player's save files. System-slot saves go through.
+-- request (game slots and the system slot) is skipped and listed in dev.saves, so tests never write
+-- the player's save files, and no Steam achievement is unlocked.
 local SAVE_FLAG = "re9coop_bridge/block_saves.flag"
 local block_t, block_v = -1, false
 local function saves_blocked()
@@ -189,8 +189,7 @@ for _, sig in ipairs({
         sdk.hook(m, function(args)
             local a = sdk.to_int64(args[3]) & 0xFFFFFFFF
             local b = sdk.to_int64(args[4]) & 0xFFFFFFFF
-            local by_category = short:find("SaveSlotCategory", 1, true) ~= nil
-            local block = saves_blocked() and (not by_category or a ~= 1)
+            local block = saves_blocked() -- system saves too (they carry achievement progress)
             local line = string.format("%s %s %d %d %s", os.date("%H:%M:%S"), short, a, b, block and "BLOCKED" or "passed")
             dev.saves[#dev.saves + 1] = line
             log.info("[re9coop devbridge] save " .. line)
@@ -204,6 +203,25 @@ for _, sig in ipairs({
             return retval
         end)
     end
+end
+
+-- No Steam achievements from tests either (while the same flag is on).
+local skipped_ach = false
+local m_ach = sdk.find_type_definition("app.AchievementManager"):get_method("unlockAchievement")
+if m_ach then
+    sdk.hook(m_ach, function(args)
+        skipped_ach = saves_blocked()
+        if skipped_ach then
+            log.info("[re9coop devbridge] achievement unlock BLOCKED")
+            return sdk.PreHookResult.SKIP_ORIGINAL
+        end
+    end, function(retval)
+        if skipped_ach then
+            skipped_ach = false
+            return sdk.to_ptr(0)
+        end
+        return retval
+    end)
 end
 
 log.info("[re9coop devbridge] ready")
