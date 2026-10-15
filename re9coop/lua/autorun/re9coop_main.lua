@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.8.0"
-local PROTO = 7
+local VERSION = "0.9.0"
+local PROTO = 8
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -49,7 +49,16 @@ local cfg = {
     revive = true,            -- a lethal hit downs you while your partner is with you; they get you up
     pickups_for_both = false, -- ammo, healing and crafting items too: each player picks up their own
     recipe_sync = true,       -- a crafting recipe one player unlocks is unlocked for both
+    respawn_at_partner = true, -- down and not got up in time: you come to next to your partner
+    skip_together = true,     -- a cutscene one player skips is skipped for the other too
+    partner_marker = true,    -- the partner on the map and at the screen edge when out of sight
+    share_drops = true,       -- what an enemy drops is there for both (one copy, unless each picks their own)
     public_lobby = false,     -- anyone with the lobby ID can join (otherwise friends and invitees)
+    auto_rejoin = true,       -- a session that drops (or a game that crashed) is picked up again
+    last_host = "",           -- the last session: the host's Steam ID, its lobby, ours?, when (os.time)
+    last_lobby = "",
+    last_was_host = false,
+    last_t = 0,
 }
 
 local function load_cfg()
@@ -308,6 +317,7 @@ local function refresh_player()
             c = c:call("get_Next")
         end
         say("player %s in %s (%d joints)", me.kind, me.chapter, #me.joints)
+        me.loaded_at, me.announce_load = now(), now() + 10
     end
     return true
 end
@@ -322,7 +332,8 @@ local MSG_ENEMY_OWNERS, MSG_ENEMY_PRESENCE = 15, 16
 local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
-local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27 }
+local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
+    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
@@ -357,7 +368,7 @@ end
 
 local function read_appear(data)
     local a = { parts = {}, names = {} }
-    local n, pos
+    local _, n, pos
     _, a.kind, a.skel, n, pos = string.unpack("<Bs2s2B", data)
     for i = 1, n do
         local p = {}
@@ -428,7 +439,7 @@ end
 
 local function read_pose(data)
     local s = {}
-    local x, y, z, qx, qy, qz, qw, rx, ry, rz, hx, hy, hz, n, pos
+    local _, x, y, z, qx, qy, qz, qw, rx, ry, rz, hx, hy, hz, n, pos
     _, s.seq, s.t, s.chapter, x, y, z, qx, qy, qz, qw, rx, ry, rz, hx, hy, hz, s.flags, n, pos =
         string.unpack("<BHds1fff hhhh ffffff HB", data)
     s.pos = Vector3f.new(x, y, z)
@@ -553,6 +564,8 @@ function Puppet:apply(pos, rot, s_a, s_b, f)
     if self.j_hip then self.j_hip:call("set_LocalPosition", s_a.hip + (s_b.hip - s_a.hip) * f) end
 end
 
+local rig_enable -- below, with the lights
+
 function Puppet:set_visible(v)
     if self.state ~= "ready" or self.visible == v then return end
     self.visible = v
@@ -613,7 +626,7 @@ local function light_rig(at)
     return rig
 end
 
-local function rig_enable(rig, spot, point, extras)
+rig_enable = function(rig, spot, point, extras)
     if rig == nil then return end
     if rig.spot then rig.spot:call("set_Enabled", spot) end
     if rig.point then rig.point:call("set_Enabled", point) end
@@ -843,7 +856,7 @@ local function on_ctrl(from, data)
         ext.later(function() world_ctrl(from, kind, data) end)
     elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS or kind == MSG.GIMMICK_TRIGGER) and gimmick_ctrl then
         gimmick_ctrl(from, kind, data)
-    elseif kind == MSG_STORY and story_ctrl then
+    elseif (kind == MSG_STORY or kind == MSG.STORY_FWD) and story_ctrl then
         ext.later(function() story_ctrl(from, kind, data) end)
     elseif kind == MSG.BOX and ext.box_ctrl then
         ext.box_ctrl(from, kind, data)
@@ -853,6 +866,12 @@ local function on_ctrl(from, data)
         ext.life_ctrl(from, kind, data)
     elseif kind == MSG.RECIPES and ext.recipes_ctrl then
         ext.recipes_ctrl(from, kind, data)
+    elseif kind == MSG.LOADED and ext.loaded_ctrl then
+        ext.loaded_ctrl(from, kind, data)
+    elseif kind == MSG.CUTSCENE and ext.cut_ctrl then
+        ext.cut_ctrl(from, kind, data)
+    elseif (kind == MSG.DROP or kind == MSG.DROP_TAKEN) and ext.drops_ctrl then
+        ext.drops_ctrl(from, kind, data)
     end
 end
 
@@ -930,7 +949,8 @@ end
 -------------------------------------------------------------------------------------------------
 -- session
 -------------------------------------------------------------------------------------------------
-local session = { last_members = "", next_ping = 0, next_send = 0, next_join_poll = 0, status = nil }
+local session = { last_members = "", next_ping = 0, next_send = 0, next_join_poll = 0, status = nil,
+    was_in = false, left = false, rj = nil }
 
 -------------------------------------------------------------------------------------------------
 -- shared enemies: each enemy is run by the player it is closest to
@@ -1309,7 +1329,7 @@ end
 
 local function read_enemy(data)
     local s = {}
-    local x, y, z, qx, qy, qz, qw, pos
+    local _, x, y, z, qx, qy, qz, qw, pos
     _, s.seq, s.t, s.chapter, s.id, s.kind, s.flags, x, y, z, qx, qy, qz, qw, s.hp, pos = string.unpack(ENEMY_HEAD, data)
     s.pos, s.rot = Vector3f.new(x, y, z), unpack_quat(qx, qy, qz, qw)
     if s.flags & F_POSE ~= 0 then
@@ -1454,6 +1474,8 @@ local function enemies_tick(t_now)
             st.killed = true
             if foes.puppets[id] then release_puppet(id, true) end
             if e.ctx:call("get_IsSpawn") and not e.ctx:call("get_IsDead") then
+                -- what it drops comes from the owner's game (see "enemy drops")
+                if cfg.share_drops then pcall(e.ctx.set_field, e.ctx, "<IsPermitedItemDropnOnDead>k__BackingField", false) end
                 local hp = e.ctx:call("get_HitPoint")
                 local cur = hp and hp:call("get_CurrentHitPoint") or 0
                 apply_damage(e, 0, math.max(1, cur) + 100, false, true)
@@ -1639,11 +1661,12 @@ world = {
     applied_at = {},            -- door id -> when we last pushed it for the partner (echo guard)
     sent_at = {},               -- door id -> when we last sent a push (rate limit)
     out = {},
+    taken = {},                 -- item id -> true: what we picked up in this scene (shared kinds)
     stats = { doors_sent = 0, doors_applied = 0, items_sent = 0, items_applied = 0 },
 }
 
 world_reset = function()
-    world.doors, world.door_ids, world.items, world.item_ids = {}, {}, {}, {}
+    world.doors, world.door_ids, world.items, world.item_ids, world.taken = {}, {}, {}, {}, {}
     world.index_t, world.applied_at, world.sent_at, world.out = 0, {}, {}, {}
 end
 
@@ -1734,6 +1757,7 @@ sdk.hook(M_ITEM_PICKED, function(args)
     local id = world.item_ids[sdk.to_int64(args[2])]
     if id and #world.out < 32 then
         world.out[#world.out + 1] = string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id)
+        world.taken[id] = true
     end
 end, nil)
 
@@ -2246,7 +2270,8 @@ gimmicks_late = function(t_now)
     gimmick_scan(t_now)
     local st_net = session.status
     local partner = partner_to_follow and partner_to_follow()
-    if st_net and st_net.is_host and partner and partner.id ~= LOOPBACK_ID and partner.chapter == me.chapter then
+    if partner and partner.id ~= LOOPBACK_ID and partner.chapter == me.chapter
+        and (gim.full_done_for == partner.id or ext.may_full_sync(st_net, partner.id)) then
         gimmick_full_sync(t_now, partner.id)
     end
     if #gim.out > 0 then
@@ -2332,12 +2357,14 @@ sdk.hook(M_SET_PROGRESS, function(args)
 end, nil)
 
 local function apply_story(data)
-    local _, chapter, hash, value = string.unpack("<Bs1I4i4", data)
+    local kind, chapter, hash, value = string.unpack("<Bs1I4i4", data)
     if chapter ~= me.chapter then return end
     local lf = level_flow()
     if lf == nil then return end
     local ok, cur = pcall(lf.call, lf, "getProgressiveNumber", hash)
     if ok and cur == value then return end
+    -- a whole-chapter catch-up only moves flows on, never back
+    if kind == MSG.STORY_FWD and ok and type(cur) == "number" and cur > value then return end
     story.expect[hash] = value
     pcall(lf.call, lf, "requestChangeProgressiveNumber", hash, value)
     story.stats.applied = story.stats.applied + 1
@@ -2384,7 +2411,7 @@ end
 
 story_ctrl = function(from, kind, data)
     if not world_shared() or not cfg.story_sync then return end
-    if kind == MSG_STORY then pcall(apply_story, data) end
+    if kind == MSG_STORY or kind == MSG.STORY_FWD then pcall(apply_story, data) end
 end
 
 story_reset = function()
@@ -2396,13 +2423,13 @@ story_late = function(t_now)
     local st_net = session.status
     -- the lobby owner sends every flow that has moved, once per partner per chapter
     local partner = partner_to_follow and partner_to_follow()
-    if cfg.story_sync and st_net and st_net.is_host and partner and partner.id ~= LOOPBACK_ID
-        and partner.chapter == me.chapter and story.full_done_for ~= partner.id then
+    if cfg.story_sync and partner and partner.id ~= LOOPBACK_ID and partner.chapter == me.chapter
+        and story.full_done_for ~= partner.id and ext.may_full_sync(st_net, partner.id) then
         story.full_done_for = partner.id
         local n = 0
         for hash, value in pairs(progress_list()) do
             if value ~= 0 then
-                send_ctrl(string.pack("<Bs1I4i4", MSG_STORY, me.chapter, hash, value), partner.id)
+                send_ctrl(string.pack("<Bs1I4i4", MSG.STORY_FWD, me.chapter, hash, value), partner.id)
                 n = n + 1
             end
         end
@@ -2469,7 +2496,8 @@ box = {
     next_scan = 0,
     gimmicks = {}, gimmicks_t = 0, gimmicks_chapter = "",
     full_done_for = nil,
-    stats = { sent = 0, applied = 0 },
+    my_takes = {},      -- "box key|panel" -> when we took that out (both taking it: see apply_ops)
+    stats = { sent = 0, applied = 0, races = 0 },
 }
 
 local function box_inventories()
@@ -2579,23 +2607,62 @@ local function add_entry(inv, e)
     return true
 end
 
-local function apply_ops(inv, ops)
+local function apply_ops(inv, ops, key)
     local list = read_box(inv)
     for _, op in ipairs(ops) do
         local sign, body = op:sub(1, 1), op:sub(2)
         if sign == "-" then
+            local found = false
             for i, x in ipairs(list) do
                 if x.id == body then
                     pcall(inv.call, inv, SIG_REMOVE, x.key, EVENT_MOVED)
                     table.remove(list, i)
+                    found = true
                     break
                 end
             end
+            if not found and key then box.race(key, body) end
         elseif sign == "+" and not add_entry(inv, body) then
             say("couldn't put %s in the box", body:match("^[^|]*"))
         end
     end
     box.stats.applied = box.stats.applied + 1
+end
+
+-- The partner took out what isn't in our box any more because we took it out too, a moment ago:
+-- both got it. The lobby owner keeps it; the guest's copy goes from their hands (the same panel,
+-- if it is still there as it came out of the box).
+box.race = function(key, body)
+    local mine = box.my_takes[key .. "|" .. body]
+    if mine == nil or now() - mine > 10 then return end
+    box.my_takes[key .. "|" .. body] = nil
+    box.stats.races = box.stats.races + 1
+    local item = body:match("^[^|]*")
+    local st_net = session.status
+    if st_net and st_net.is_host then
+        say("you and your partner took %s from the box at the same time: it's yours", item)
+        return
+    end
+    local user = key:match("^(.-)/")
+    local m = sdk.get_managed_singleton("app.InventoryManager")
+    local d = m and m:get_field("_Inventories")
+    local n = d and d:get_field("_count") or 0
+    for i, e in ipairs(elements(d and d:get_field("_entries")) or {}) do
+        if i > n then break end
+        local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
+        local k = inv and inv:get_field("_InventoryKey")
+        local u = k and k:get_field("_User")
+        if k and k:get_field("_BoardType") == 0 and not k:get_field("_IsTemporal") and u and u:call("ToString") == user then
+            for _, x in ipairs(read_box(inv)) do
+                if x.id == body then
+                    pcall(inv.call, inv, SIG_REMOVE, x.key, EVENT_MOVED)
+                    say("your partner took %s from the box first: it's theirs", item)
+                    return
+                end
+            end
+        end
+    end
+    say("you and your partner both took %s from the box", item)
 end
 
 -- what changed in a box since we last looked, as operations
@@ -2665,7 +2732,7 @@ end
 
 ext.box_reset = function()
     box.gimmicks, box.gimmicks_t = {}, 0
-    box.known = {} -- the next scene starts from what its boxes hold
+    box.known, box.my_takes = {}, {} -- the next scene starts from what its boxes hold
 end
 
 box.late = function(t_now)
@@ -2684,6 +2751,9 @@ box.late = function(t_now)
             if #ops > 0 then
                 send_ctrl(pack_box(key, FLAG_OPS, ops))
                 box.stats.sent = box.stats.sent + 1
+                for _, op in ipairs(ops) do
+                    if op:sub(1, 1) == "-" then box.my_takes[key .. "|" .. op:sub(2)] = t_now end
+                end
             end
         end
     end
@@ -2698,7 +2768,7 @@ box.late = function(t_now)
                 if m.flag == FLAG_JOIN then
                     ok, err = pcall(join_merge, m.key, inv, m.ops, m.from)
                 else
-                    ok, err = pcall(apply_ops, inv, m.ops)
+                    ok, err = pcall(apply_ops, inv, m.ops, m.key)
                 end
                 if not ok and tostring(err):find("unreadable", 1, true) then
                     box.queue[#box.queue + 1] = m -- nothing was applied: next time
@@ -2713,7 +2783,7 @@ box.late = function(t_now)
     -- the lobby owner sends its boxes once to a partner who joins
     local st_net = session.status
     local partner = partner_to_follow and partner_to_follow()
-    if st_net and st_net.is_host and partner and partner.id ~= LOOPBACK_ID and box.full_done_for ~= partner.id then
+    if partner and partner.id ~= LOOPBACK_ID and box.full_done_for ~= partner.id and ext.may_full_sync(st_net, partner.id) then
         box.full_done_for = partner.id
         for key, inv in pairs(invs) do
             local entries = {}
@@ -2750,6 +2820,10 @@ if M_GUI_UPDATE then
         if ext.recipes_gui then
             ok, err = pcall(ext.recipes_gui)
             if not ok then say("recipe error: %s", tostring(err)) end
+        end
+        if ext.cut_gui then
+            ok, err = pcall(ext.cut_gui)
+            if not ok then say("cutscene error: %s", tostring(err)) end
         end
     end, nil)
 end
@@ -2838,6 +2912,366 @@ ext.recipes_gui = function()
     if added > 0 then
         recipes.stats.applied = recipes.stats.applied + added
         say("%d crafting recipe(s) from your partner", added)
+    end
+end
+end
+
+-------------------------------------------------------------------------------------------------
+-- cutscenes together
+-------------------------------------------------------------------------------------------------
+-- A cutscene one player skips is skipped in the partner's game too when it plays the same one: the
+-- game's own TimelineEventMediator.skip (what the pause menu's "skip" calls), matched by the event's
+-- TimelineEventId. The partner's skip may come just before ours starts: it waits 5 s for it.
+do
+local T_MEDIATOR = "app.TimelineEventMediator" -- the story section's is local to it
+local cut = { pending = nil, until_t = 0, replaying = false, fade_check = nil, stats = { sent = 0, applied = 0 } }
+ext.cut = cut
+
+local function mediator()
+    return sdk.get_managed_singleton(T_MEDIATOR)
+end
+
+-- the id of the cutscene playing here, or nil
+local function current_event(m)
+    local list = m and m:get_field("_ActiveEvents")
+    local n = list and list:call("get_Count") or 0
+    for i = 0, n - 1 do
+        local e = list:call("get_Item", i)
+        local ok, id = pcall(e.get_field, e, "<TimelineEventId>k__BackingField")
+        if ok and id then return id end
+    end
+    return nil
+end
+cut.current_event = current_event
+
+sdk.hook(sdk.find_type_definition(T_MEDIATOR):get_method("skip(System.Object)"), function()
+    if cut.replaying or not cfg.skip_together or not world_shared() then return end
+    local id = current_event(mediator())
+    if id then
+        send_ctrl(string.pack("<Bs1i4", MSG.CUTSCENE, me.chapter, id))
+        cut.stats.sent = cut.stats.sent + 1
+    end
+end, nil)
+
+ext.cut_ctrl = function(_, _, data)
+    if not cfg.skip_together or not world_shared() then return end
+    local _, chapter, id = string.unpack("<Bs1i4", data)
+    if chapter == me.chapter then cut.pending, cut.until_t = id, now() + 5 end
+end
+
+-- inside the game's GUI update
+ext.cut_gui = function()
+    local t = now()
+    if cut.pending then
+        local m = mediator()
+        if t > cut.until_t then
+            cut.pending = nil
+        elseif m and m:call("get_IsPlayingCutScene") and m:call("get_IsSkippable") and current_event(m) == cut.pending then
+            cut.pending, cut.replaying = nil, true
+            local ok, done = pcall(m.call, m, "skip(System.Object)", m) -- the caller can't be null
+            cut.replaying = false
+            if ok and done then
+                cut.stats.applied, cut.fade_check = cut.stats.applied + 1, t + 8
+                say("your partner skipped the cutscene")
+            end
+        end
+    end
+    -- backstop: the cutscene layer's fade comes back once no cutscene plays (the game does it itself)
+    if cut.fade_check and t > cut.fade_check then
+        cut.fade_check = nil
+        local m, fm = mediator(), sdk.get_managed_singleton("app.FadeManager")
+        if fm and m and me.go and not m:call("get_IsPlayingCutScene") and fm:call("isFadeOut", 4) then
+            pcall(fm.call, fm, "requestFadeIn", 4, 0.5, nil, nil)
+        end
+    end
+end
+end
+
+-------------------------------------------------------------------------------------------------
+-- after a game over
+-------------------------------------------------------------------------------------------------
+-- A game over sends a player back to a checkpoint, behind the partner. When our game has loaded (a
+-- retry, a save) it tells the partner; a partner who stayed in this chapter all along answers so and
+-- sends its world again, as to a player who joins: story steps (only forward), gimmicks, the item
+-- box, recipes and the pickups it made here. A lobby owner whose own game just loaded waits 4 s for
+-- that answer before it sends its world, so it never winds a partner who stayed back.
+do
+local STAYED = 1
+local sync = { partner_stayed = false, resync_to = nil, stats = { resyncs = 0 } }
+ext.sync = sync
+
+-- may we send `pid` our whole world now?
+ext.may_full_sync = function(st_net, pid)
+    if sync.resync_to == pid then return true end
+    if not (st_net and st_net.is_host) or sync.partner_stayed then return false end
+    return now() >= (me.loaded_at or -100) + 4
+end
+
+ext.sync_scene = function()
+    sync.partner_stayed, sync.resync_to = false, nil
+end
+
+ext.loaded_ctrl = function(from, _, data)
+    if not world_shared() then return end
+    local _, chapter, flag = string.unpack("<Bs1B", data)
+    if chapter ~= me.chapter or me.go == nil then return end
+    if flag == STAYED then
+        sync.partner_stayed = true
+        return
+    end
+    if now() - (me.loaded_at or -100) < 10 then return end -- we've just loaded too
+    sync.resync_to = from
+    sync.stats.resyncs = sync.stats.resyncs + 1
+    gim.full_done_for, story.full_done_for, box.full_done_for = nil, nil, nil
+    if ext.recipes then ext.recipes.peer = nil end
+    send_ctrl(string.pack("<Bs1B", MSG.LOADED, me.chapter, STAYED), from)
+    local n = 0
+    for id in pairs(world.taken) do
+        send_ctrl(string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id), from)
+        n = n + 1
+    end
+    say("your partner is back at a checkpoint: sending them this chapter as it is here (%d pickups)", n)
+end
+
+-- tell the partner once our game has loaded (up to 10 s, until they're there)
+ext.sync_late = function(t_now)
+    if me.announce_load == nil or me.go == nil then return end
+    if t_now > me.announce_load then
+        me.announce_load = nil
+        return
+    end
+    local p = partner_to_follow and partner_to_follow()
+    if not world_shared() or p == nil or p.id == LOOPBACK_ID then return end
+    me.announce_load = nil
+    send_ctrl(string.pack("<Bs1B", MSG.LOADED, me.chapter, 0), p.id)
+end
+end
+
+-------------------------------------------------------------------------------------------------
+-- where the partner is
+-------------------------------------------------------------------------------------------------
+-- On the game's map (app.UI2500GuiBehavior; open while its GameObject draws): a dot and the name
+-- where the partner is, placed from our own icon's GUI position by the offset between us in the
+-- world: the floor maps are 20.48 map units (GUI pixels at zoom 1) per metre, x to the right and z
+-- down. Over 2.5 m up or down is another floor: the label says which. In play: when the partner's
+-- puppet isn't in view, their name and distance where they are, or at the screen's edge toward them.
+do
+local MAP_SCALE, FLOOR_STEP = 20.48, 2.5
+local T_MAP = sdk.typeof("app.UI2500GuiBehavior")
+local mark = { map = nil, map_t = 0 }
+ext.mark = mark
+
+local function screen_size()
+    local ok, s = pcall(imgui.get_display_size)
+    if ok and s and s.x > 0 then return s.x, s.y end
+    return 1920, 1080
+end
+
+local function find_map(t)
+    if mark.map == nil and t > mark.map_t then
+        mark.map_t = t + 3
+        mark.map = world.scene_components(T_MAP)[1]
+    end
+    return mark.map
+end
+
+local function floor_tag(dy)
+    if dy > FLOOR_STEP then return " (above)" end
+    if dy < -FLOOR_STEP then return " (below)" end
+    return ""
+end
+
+-- true when the map is open (whether or not the partner could be shown on it)
+local function draw_on_map(m, p, ppos, mpos, sw, sh)
+    if not m:call("get_GameObject"):call("get_DrawSelf") then return false end
+    if m:get_field("_IsWorldMapMode") then return true end
+    local g = m:get_field("_PlayerIconControl"):call("get_GlobalPosition")
+    local zoom = m:get_field("_ZoomMagnification") or 1
+    local d = ppos - mpos
+    local x, y = g.x + d.x * MAP_SCALE * zoom, g.y + d.z * MAP_SCALE * zoom
+    -- kept inside the map's frame (a rect around its centre)
+    local okr, r = pcall(m.get_field, m, "_DisplayRange")
+    if okr and r then
+        local c, size = r:call("get_GlobalPosition"), r:call("get_Size")
+        local hw, hh = size.w / 2 - 14, size.h / 2 - 24
+        x, y = math.max(c.x - hw, math.min(c.x + hw, x)), math.max(c.y - hh, math.min(c.y + hh, y))
+    end
+    x, y = x * sw / 1920, y * sh / 1080
+    draw.filled_circle(x, y, 9, 0xFF30A0FF, 16)
+    draw.outline_circle(x, y, 10, 0xFF000000, 16)
+    local label = p.name .. floor_tag(d.y)
+    draw.text(label, x - #label * 3.5, y + 12, 0xFF30A0FF)
+    return true
+end
+
+local function draw_edge(p, ppos, mpos, sw, sh, why)
+    local dist = (ppos - mpos):length()
+    local label = string.format("%s  %d m%s%s", p.name, math.floor(dist + 0.5), floor_tag(ppos.y - mpos.y), why)
+    local sp = draw.world_to_screen(ppos + Vector3f.new(0, 1.0, 0))
+    if sp and sp.x > 40 and sp.x < sw - 40 and sp.y > 40 and sp.y < sh - 40 then
+        draw.text(label, sp.x - #label * 3.5, sp.y, 0xC0FFFFFF)
+        return
+    end
+    local cam = sdk.get_primary_camera():call("get_GameObject"):call("get_Transform")
+    local rot = cam:call("get_Rotation")
+    local d = ppos - cam:call("get_Position")
+    local a = math.atan(d:dot(rot * Vector3f.new(1, 0, 0)), d:dot(rot * Vector3f.new(0, 0, -1)))
+    local x = sw / 2 + math.sin(a) * (sw / 2 - 90)
+    local y = sh / 2 - math.cos(a) * (sh / 2 - 50)
+    draw.filled_circle(x, y, 7, 0xFF30A0FF, 12)
+    draw.text(label, math.max(4, math.min(sw - #label * 7 - 4, x - #label * 3.5)), y + 10, 0xFF30A0FF)
+end
+
+ext.mark_draw = function()
+    if not cfg.partner_marker or me.go == nil then return end
+    local t = now()
+    local sw, sh = screen_size()
+    local mpos = me.go:call("get_Transform"):call("get_Position")
+    local m = find_map(t)
+    for _, p in pairs(peers) do
+        local s = p.snaps[#p.snaps]
+        if s and p.chapter == me.chapter and t - p.last < 3 then
+            -- where the puppet stands (the self test's echo is placed off our own position)
+            local pup = p.puppet
+            local ready = pup and pup.state == "ready" and pup.root
+            local ppos = ready and pup.root:call("get_Transform"):call("get_Position") or s.pos
+            local open = false
+            if m then
+                local okm, o = pcall(draw_on_map, m, p, ppos, mpos, sw, sh)
+                if okm then open = o else mark.map = nil end
+            end
+            local in_view = ready and pup.visible and (ppos - mpos):length() < 25
+            if not open and not in_view then
+                local cutscene = p.flags and p.flags & FLAG_CUTSCENE ~= 0
+                pcall(draw_edge, p, ppos, mpos, sw, sh, cutscene and "  (cutscene)" or "")
+            end
+        end
+    end
+end
+
+ext.mark_scene = function()
+    mark.map, mark.map_t = nil, 0
+end
+end
+
+-------------------------------------------------------------------------------------------------
+-- enemy drops
+-------------------------------------------------------------------------------------------------
+-- What an enemy leaves when it dies (ItemManager.requestGenerateItem with ReliefCh, made in the game
+-- of the player who runs that enemy) is made in the partner's game too, at the same spot; the
+-- partner's copy of the enemy drops nothing of its own (its IsPermitedItemDropnOnDead is cleared
+-- before it dies there). Picking one up takes the partner's copy away, unless each player picks up
+-- their own: generated items have per-PC IDs, so they're matched by item and place (1.5 m). The
+-- amount data is a copy of one of our own stocks (PanelState.deployAmountData) given the item and
+-- count: app.ItemAmountData can't be created from Lua.
+do
+local SIG_GEN = "requestGenerateItem(app.ItemAmountData, via.Position, via.Quaternion, app.ItemGenerateRequestType, System.Action`1<app.ItemContext>, System.Action`1<app.ItemCore>)"
+local T_ITEM_CORE = sdk.typeof("app.ItemCore")
+local drops = { applying = false, relief = nil, stats = { sent = 0, made = 0, taken = 0 } }
+ext.drops = drops
+
+local function relief()
+    if drops.relief == nil then
+        drops.relief = sdk.find_type_definition("app.ItemGenerateRequestType"):get_field("ReliefCh"):get_data(nil) or false
+    end
+    return drops.relief or nil
+end
+
+local function is_relief(obj_or_addr)
+    local r = relief()
+    if r == nil or obj_or_addr == nil then return false end
+    local a = type(obj_or_addr) == "number" and obj_or_addr or obj_or_addr:get_address()
+    return a == r:get_address()
+end
+
+local function share()
+    return cfg.share_drops and world_shared()
+end
+
+sdk.hook(sdk.find_type_definition("app.ItemManager"):get_method(SIG_GEN), function(args)
+    if drops.applying or not share() or not is_relief(sdk.to_int64(args[6])) then return end
+    local a = sdk.to_managed_object(args[3])
+    local okp, pos = pcall(sdk.to_valuetype, args[4], "via.Position")
+    if a == nil or not okp or pos == nil then return end
+    local item = a:get_field("_ItemID")
+    local okc, count = pcall(a.get_field, a, "_Stock")
+    if type(item) ~= "string" then return end
+    send_ctrl(string.pack("<Bs1s1i4ddd", MSG.DROP, me.chapter, item, okc and count or 1,
+        pos:get_field("x"), pos:get_field("y"), pos:get_field("z")))
+    drops.stats.sent = drops.stats.sent + 1
+end, nil)
+
+sdk.hook(sdk.find_type_definition("app.ItemCore"):get_method("notifyPickupped(System.Boolean)"), function(args)
+    if drops.applying or not share() or cfg.pickups_for_both or (sdk.to_int64(args[3]) & 1) == 0 then return end
+    local core = sdk.to_managed_object(args[2])
+    local ok, gt = pcall(core.get_field, core, "_GenerateType")
+    if not ok or not is_relief(gt) then return end
+    local name = core:call("get_ItemID"):get_field("_Name")
+    local p = core:call("get_GameObject"):call("get_Transform"):call("get_Position")
+    send_ctrl(string.pack("<Bs1s1ddd", MSG.DROP_TAKEN, me.chapter, name, p.x, p.y, p.z))
+end, nil)
+
+-- an ItemAmountData to fill in: a copy of the first stock in our hands
+local function amount_data()
+    local m = sdk.get_managed_singleton("app.InventoryManager")
+    local d = m and m:get_field("_Inventories")
+    local n = d and d:get_field("_count") or 0
+    for i, e in ipairs(elements(d and d:get_field("_entries")) or {}) do
+        if i > n then break end
+        local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
+        local k = inv and inv:get_field("_InventoryKey")
+        if k and k:get_field("_BoardType") == 0 and not k:get_field("_IsTemporal") then
+            local st = (elements(inv:call("getPanelStates")) or {})[1]
+            if st then return st:call("deployAmountData") end
+        end
+    end
+    return nil
+end
+
+local function make_drop(item, count, x, y, z)
+    local f = sdk.find_type_definition("app.ItemID"):get_field(item)
+    local id = f and f:get_data(nil)
+    local a = id and amount_data()
+    if a == nil then return end
+    a:call("set_ItemID", id)
+    pcall(a.set_field, a, "_Stock", count)
+    local pos = ValueType.new(sdk.find_type_definition("via.Position"))
+    pos:set_field("x", x)
+    pos:set_field("y", y)
+    pos:set_field("z", z)
+    local im = sdk.get_managed_singleton("app.ItemManager")
+    drops.applying = true
+    local ok = pcall(im.call, im, SIG_GEN, a, pos, Quaternion.new(1, 0, 0, 0), relief(), nil, nil)
+    drops.applying = false
+    if ok then drops.stats.made = drops.stats.made + 1 end
+end
+
+local function take_drop(item, x, y, z)
+    local at = Vector3f.new(x, y, z)
+    for _, core in ipairs(world.scene_components(T_ITEM_CORE)) do
+        local ok, gt = pcall(core.get_field, core, "_GenerateType")
+        if ok and is_relief(gt) and core:call("get_ItemID"):get_field("_Name") == item then
+            local p = core:call("get_GameObject"):call("get_Transform"):call("get_Position")
+            local ctx = core:get_field("_Context")
+            if (p - at):length() < 1.5 and ctx and ctx:call("get_IsSpawn") then
+                drops.applying = true
+                pcall(ctx.call, ctx, "set_IsSpawn", false)
+                drops.applying = false
+                drops.stats.taken = drops.stats.taken + 1
+                return
+            end
+        end
+    end
+end
+
+ext.drops_ctrl = function(_, kind, data)
+    if not share() then return end
+    if kind == MSG.DROP then
+        local _, chapter, item, count, x, y, z = string.unpack("<Bs1s1i4ddd", data)
+        if chapter == me.chapter then ext.later(function() make_drop(item, count, x, y, z) end) end
+    else
+        local _, chapter, item, x, y, z = string.unpack("<Bs1s1ddd", data)
+        if chapter == me.chapter then ext.later(function() take_drop(item, x, y, z) end) end
     end
 end
 end
@@ -2968,8 +3402,9 @@ end
 -- (HitPoint.NoDeath) is on, so a hit that would kill you leaves you at 1 HP, and you go down: no
 -- moving, aiming or items (the game's player restrictions, requested every frame), no more damage
 -- (Invincible), and a grab on you is ended. Your partner crouches next to you for a moment to get you
--- up with a third of your health. If nobody does within 90 s, your partner leaves, or you both go
--- down, you die the game's way (game over, back to the last checkpoint).
+-- up with a third of your health. If nobody does within 30 s you come to next to your partner
+-- (unless "come to next to your partner" is off: then after 90 s). If your partner leaves, or you
+-- both go down, you die the game's way (game over, back to the last checkpoint).
 -- Grabbed: the game's grapple controller (GrappleFsmController.requestGrapple / startGrapple with our
 -- player among its participants) tells us we're held. Your partner frees you by hurting the enemy that
 -- holds you (their hits on it reach your game) or by a melee attack (knife, kick) next to you; the grab
@@ -2992,7 +3427,8 @@ local life = {
     dead = false,         -- we died: nothing more until the game brings a new player object
     grab = nil, end_grab = false,
     revive_t = 0, revive_for = nil, rescue_t = 0,
-    stats = { downs = 0, revived = 0, rescues = 0 },
+    come_to_after = 30,   -- s down before we come to next to the partner
+    stats = { downs = 0, revived = 0, rescues = 0, came_to = 0 },
 }
 ext.life = life
 
@@ -3044,6 +3480,14 @@ local function get_up(t_now, ratio)
     life.invincible_until = t_now + 2 -- a moment to get away
     life.stats.revived = life.stats.revived + 1
     say("back on your feet")
+end
+
+-- nobody got us up: we come to next to the partner (no game over, the worlds stay together)
+life.come_to = function(t_now)
+    get_up(t_now, 0.35)
+    life.stats.came_to = life.stats.came_to + 1
+    ext.later(function() say("%s", teleport_to_partner()) end)
+    say("you came to next to your partner")
 end
 
 -- die the game's way (game over)
@@ -3145,7 +3589,10 @@ ext.life_tick = function(t_now)
         else
             life.both_since = nil
         end
-        if t_now - life.down_since > BLEED_OUT or (life.alone_since and t_now - life.alone_since > PARTNER_GONE)
+        local partner_up = p and not (p.flags and p.flags & FLAG_DOWN ~= 0)
+        if cfg.respawn_at_partner and partner_up and t_now - life.down_since > life.come_to_after then
+            life.come_to(t_now)
+        elseif t_now - life.down_since > BLEED_OUT or (life.alone_since and t_now - life.alone_since > PARTNER_GONE)
             or (life.both_since and t_now - life.both_since > 3) then
             die()
         end
@@ -3189,8 +3636,10 @@ end
 ext.life_draw = function()
     local cx = 960
     if life.down_since and not life.dead then
-        local left = math.max(0, math.ceil(BLEED_OUT - (now() - life.down_since)))
-        local msg = string.format("You're down. Your partner can get you up (crouch next to you). %d s", left)
+        local come = cfg.respawn_at_partner
+        local left = math.max(0, math.ceil((come and life.come_to_after or BLEED_OUT) - (now() - life.down_since)))
+        local msg = come and string.format("You're down. Your partner can get you up (crouch next to you), or you come to next to them in %d s", left)
+            or string.format("You're down. Your partner can get you up (crouch next to you). %d s", left)
         draw.text(msg, cx - #msg * 3.5, 520, 0xFF4040FF)
     end
     for _, p in pairs(peers) do
@@ -3257,7 +3706,52 @@ local function tick_session(t_now)
         local lobby = net.pending_join()
         if lobby then
             say("joining lobby %s from a Steam invite", lobby)
+            session.left = false
             net.join(lobby)
+        end
+    end
+    -- Reconnecting: a session that drops without "Leave" (a Steam hiccup) is picked up again for 3
+    -- minutes: the guest tries its lobby and the host's lobby as Steam friends list it; the host hosts
+    -- again. The last session is kept in the config, so a game restarted after a crash does the same
+    -- (the guest within 30 minutes, the host within 10).
+    local busy = st.state == "creating" or st.state == "joining"
+    if st.state == "in_lobby" then
+        if st.owner ~= "" and (cfg.last_host ~= st.owner or cfg.last_lobby ~= st.lobby or os.time() - cfg.last_t > 300) then
+            cfg.last_host, cfg.last_lobby, cfg.last_was_host, cfg.last_t = st.owner, st.lobby, st.is_host, os.time()
+            save_cfg()
+        end
+        session.was_in, session.rj, session.left = true, nil, false
+    elseif session.was_in and not busy then
+        session.was_in = false
+        if cfg.auto_rejoin and not session.left then
+            session.rj = { till = t_now + 180, next = t_now + 2, tries = 0 }
+            say("the co-op session dropped: reconnecting...")
+        end
+    elseif session.rj == nil and not session.started and cfg.auto_rejoin and cfg.last_host ~= "" and me.go then
+        session.started = true
+        local age = os.time() - cfg.last_t
+        if age < (cfg.last_was_host and 600 or 1800) then
+            session.rj = { till = t_now + 180, next = t_now + 2, tries = 0 }
+            say(cfg.last_was_host and "hosting your co-op session again (Leave to stop)" or "looking for your partner's co-op session...")
+        end
+    end
+    local rj = session.rj
+    if rj and st.state ~= "in_lobby" and not busy and t_now >= rj.next then
+        if t_now > rj.till then
+            session.rj = nil
+            say("couldn't reconnect: host or join from the menu")
+        else
+            rj.next, rj.tries = t_now + 6, rj.tries + 1
+            if cfg.last_was_host then
+                net.host(2, cfg.public_lobby and 2 or 1)
+            else
+                local target
+                for _, f in ipairs(net.friends() or {}) do
+                    if f.id == cfg.last_host and f.lobby ~= "" then target = f.lobby end
+                end
+                if target == nil and rj.tries % 2 == 1 and cfg.last_lobby ~= "" then target = cfg.last_lobby end
+                if target then net.join(target) end
+            end
         end
     end
 end
@@ -3323,6 +3817,8 @@ local function scene_leaving()
         forget_player() -- on_player_lost: puppets destroyed, enemies / world / gimmicks / story / box reset
     end
     if ext.life then ext.life.hp, ext.life.hp_addr, ext.life.grab = nil, 0, nil end
+    if ext.sync_scene then ext.sync_scene() end
+    if ext.mark_scene then ext.mark_scene() end
     ext.jobs = {} -- the partner's door pushes, pickups and story steps were for the old scene
     collectgarbage("collect")
 end
@@ -3375,6 +3871,8 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("save error: %s", tostring(err)) end
     ok, err = pcall(ext.recipes_late, t_now)
     if not ok then say("recipe error: %s", tostring(err)) end
+    ok, err = pcall(ext.sync_late, t_now)
+    if not ok then say("sync error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
@@ -3392,16 +3890,26 @@ re.on_frame(function()
         draw.text(msg, 960 - #msg * 3.5, 60, 0xFF80FFFF)
     end
     if ext.life_draw then pcall(ext.life_draw) end
+    if ext.mark_draw then
+        local ok, err = pcall(ext.mark_draw)
+        if not ok then
+            say("marker error: %s", tostring(err))
+            ext.mark_draw = nil
+        end
+    end
     if not cfg.nametags then return end
     for _, p in pairs(peers) do
         local pup = p.puppet
         if pup and pup.state == "ready" and pup.visible then
-            local hp = pup:head_position()
-            local sp = hp and draw.world_to_screen(hp + Vector3f.new(0, 0.35, 0))
+            local hpos = pup:head_position()
+            local sp = hpos and draw.world_to_screen(hpos + Vector3f.new(0, 0.35, 0))
             if sp then
                 local last = p.snaps[#p.snaps]
                 local hp = (last and last.hp_max and last.hp_max > 0) and string.format("  %d%%", math.floor(last.hp * 100 / last.hp_max)) or ""
+                local my = me.go and me.go:call("get_Transform"):call("get_Position")
+                local dist = my and (hpos - my):length() or 0
                 local label = p.name .. hp .. (p.rtt and string.format("  %d ms", math.floor(p.rtt * 1000)) or "")
+                    .. (dist > 10 and string.format("  %d m", math.floor(dist + 0.5)) or "")
                 draw.text(label, sp.x - #label * 3.5, sp.y, 0xFFFFFFFF)
             end
         end
@@ -3455,12 +3963,22 @@ re.on_draw_ui(function()
         imgui.same_line()
         if imgui.button("Leave") then
             send_ctrl(string.pack("<B", MSG_BYE))
+            session.left, session.rj, cfg.last_host = true, nil, ""
+            save_cfg()
             net.leave()
         end
     elseif st.state == "creating" or st.state == "joining" then
         imgui.text("...")
     else
-        if imgui.button("Host a co-op session") then net.host(2, cfg.public_lobby and 2 or 1) end
+        if session.rj then
+            imgui.text("Reconnecting...")
+            imgui.same_line()
+            if imgui.button("Stop") then session.rj, session.left, cfg.last_host = nil, true, "" save_cfg() end
+        end
+        if imgui.button("Host a co-op session") then
+            session.left, session.rj = false, nil
+            net.host(2, cfg.public_lobby and 2 or 1)
+        end
         imgui.same_line()
         local cp, vp = imgui.checkbox("Anyone with the ID can join", cfg.public_lobby)
         if cp then cfg.public_lobby = vp save_cfg() end
@@ -3472,7 +3990,10 @@ re.on_draw_ui(function()
             imgui.text("Friends playing RE Requiem:")
             for _, f in ipairs(ui.friends) do
                 if f.lobby ~= "" then
-                    if imgui.button("Join " .. f.name .. "##" .. f.id) then net.join(f.lobby) end
+                    if imgui.button("Join " .. f.name .. "##" .. f.id) then
+                        session.left, session.rj = false, nil
+                        net.join(f.lobby)
+                    end
                 else
                     imgui.text("  " .. f.name .. " (not hosting)")
                 end
@@ -3483,7 +4004,10 @@ re.on_draw_ui(function()
         local changed, v = imgui.input_text("Lobby ID", ui.join_id)
         if changed then ui.join_id = v end
         imgui.same_line()
-        if imgui.button("Join by ID") and ui.join_id ~= "" then net.join(ui.join_id) end
+        if imgui.button("Join by ID") and ui.join_id ~= "" then
+            session.left, session.rj = false, nil
+            net.join(ui.join_id)
+        end
     end
 
     imgui.separator()
@@ -3517,6 +4041,10 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Share doors and pickups", cfg.world_sync); if c then cfg.world_sync, changed = v, true end
     c, v = imgui.checkbox("Share locks, puzzles and switches", cfg.gimmick_sync); if c then cfg.gimmick_sync, changed = v, true end
     c, v = imgui.checkbox("Share crafting recipes", cfg.recipe_sync); if c then cfg.recipe_sync, changed = v, true end
+    c, v = imgui.checkbox("Down too long: come to next to your partner", cfg.respawn_at_partner); if c then cfg.respawn_at_partner, changed = v, true end
+    c, v = imgui.checkbox("Skip cutscenes together", cfg.skip_together); if c then cfg.skip_together, changed = v, true end
+    c, v = imgui.checkbox("Show your partner on the map and at the screen edge", cfg.partner_marker); if c then cfg.partner_marker, changed = v, true end
+    c, v = imgui.checkbox("Share what enemies drop", cfg.share_drops); if c then cfg.share_drops, changed = v, true end
     c, v = imgui.checkbox("Share story progress (experimental)", cfg.story_sync); if c then cfg.story_sync, changed = v, true end
     c, v = imgui.checkbox("Follow the host to new chapters (guest)", cfg.follow_host); if c then cfg.follow_host, changed = v, true end
     c, v = imgui.checkbox("One item box for both players", cfg.box_sync); if c then cfg.box_sync, changed = v, true end

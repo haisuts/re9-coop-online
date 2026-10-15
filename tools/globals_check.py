@@ -44,3 +44,19 @@ for i, line in enumerate(src.split("\n"), 1):
             bad.setdefault(n, i)
 for n, i in sorted(bad.items(), key=lambda x: x[1]):
     print(f"{i}: {n}")
+
+# exact check from the compiled code (tools/luacheck/luacheck.exe --globals): every global the chunk
+# reads or writes, with the line; a name that isn't a standard / REFramework global is a bug (an
+# undeclared or out-of-scope local)
+import os
+import subprocess
+exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "luacheck", "luacheck.exe")
+if os.path.exists(exe):
+    out = subprocess.run([exe, "--globals", sys.argv[1]], capture_output=True, text=True).stdout
+    for row in out.splitlines():
+        line, op, name = row.split(" ", 2)
+        if name not in KNOWN:
+            print(f"{line}: global {op} {name} (bytecode)")
+            bad[name] = int(line)
+if not bad:
+    print("ok", sys.argv[1])
