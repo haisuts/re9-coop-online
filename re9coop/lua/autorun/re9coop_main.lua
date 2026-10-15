@@ -1873,6 +1873,7 @@ gim = {
     sig = {},             -- context id -> last known fingerprint
     sent_at = {},         -- context id -> last send time (rate limit)
     applied_at = {},      -- context id -> when we applied the partner's state (our game's rewrite isn't news)
+    hold = {},            -- context id -> until when the partner's data for it waits (a lock taking an unlock)
     cursor = 1, contexts = nil, contexts_t = 0, chapter = "",
     full_pending = nil,   -- list of context ids still to send in the initial full sync (lobby owner)
     full_done_for = nil,  -- peer id we did the full sync for
@@ -2001,6 +2002,7 @@ end
 local function apply_gimmick(data)
     local _, chapter, id, full, n, pos = string.unpack("<Bs1s1BH", data)
     if chapter ~= me.chapter then return end
+    if (gim.hold[id] or 0) > now() then return "held" end
     local want = {}
     for _ = 1, n do
         local tname, fname, tag, v
@@ -2072,7 +2074,7 @@ end
 
 local TYPE_KEY_HOLDER = sdk.typeof("app.InteractTriggerKeyItemInventoryHolder")
 local TYPE_LOCK = sdk.typeof("app.GmLockV2")
-local TYPE_FIX_CAMERA = sdk.typeof("app.InteractActionFixCameraHolder")
+local TYPE_ITEM_SLOTS = sdk.typeof("app.GmMultipleUseKeyItem")
 local TYPE_CORE = sdk.typeof("app.GimmickCore")
 local M_TRIGGER_PROCESS = sdk.find_type_definition("app.InteractTrigger"):get_method("onProcessEvent(via.GameObject)")
 local SIG_TRIGGER_PROCESS = "onProcessEvent(via.GameObject)"
@@ -2087,6 +2089,7 @@ local function trigger_index(t_now, force)
         return ti
     end
     ti.t, ti.chapter, ti.by_addr, ti.by_key = t_now + 30, me.chapter, {}, {}
+    ti.names = ti.names or {} -- every name replayed so far (a miss on one of these rebuilds the index)
     -- the triggers on `go` (every holder on it) whose names pass `want`
     local function add(go, want)
         local core = go and go:call("getComponent(System.Type)", TYPE_CORE)
@@ -2103,19 +2106,19 @@ local function trigger_index(t_now, force)
                 if want(name) then
                     ti.by_addr[t:get_address()] = { id = id, name = name }
                     ti.by_key[id .. "|" .. name] = { trig = t, go = go, lock = lock }
+                    ti.names[name] = true
                 end
             end
         end
     end
     for _, h in ipairs(world.scene_components(TYPE_KEY_HOLDER)) do
-        -- an item used on a close-up puzzle (the microscope) starts that puzzle: replayed on the
-        -- partner's side it starts there with nobody at it and the gimmick is stuck; its outcome
-        -- comes with the state sync instead
+        -- An item used is replayed only where it goes into item slots (the heart and lung). Anywhere
+        -- else it starts the gimmick's own scene or puzzle (a key turned, the microscope's molecules,
+        -- the pencil rubbing): replayed on the partner's side that takes the partner's camera and
+        -- controls. Locks open on their own unlock triggers below; other outcomes come with the state.
         local go = h:call("get_GameObject")
-        local okf, close_up = pcall(function()
-            return go:call("getComponent(System.Type)", TYPE_FIX_CAMERA) ~= nil and go:call("getComponent(System.Type)", TYPE_LOCK) == nil
-        end)
-        if not (okf and close_up) then add(go, key_outcome) end
+        local okf, slots = pcall(function() return go:call("getComponent(System.Type)", TYPE_ITEM_SLOTS) ~= nil end)
+        if okf and slots then add(go, key_outcome) end
     end
     for _, lock in ipairs(world.scene_components(TYPE_LOCK)) do
         local names = {}
@@ -2130,7 +2133,7 @@ local function trigger_index(t_now, force)
 end
 
 local function replayable(name)
-    return key_outcome(name) or name == "TurnOff" or name == "Unlock"
+    return key_outcome(name) or (gim.triggers.names or {})[name] == true
 end
 gim.trigger_index = trigger_index
 
@@ -2158,13 +2161,11 @@ sdk.hook(M_TRIGGER_PROCESS, function(args)
     end
 end, nil)
 
--- a lock that is open already (its data says so) isn't opened again
+-- a lock that is open already isn't opened again. Its own state says so (_IsCurrLock), not its data:
+-- the partner's data (open, one more unlock) arrives before the trigger and the lock doesn't follow it
 local function lock_open(lock)
-    local ok, open = pcall(function()
-        local d = lock:get_field("_GmLockData")
-        return d:get_field("_UnlockCount") >= d:get_field("_MaxUnlockCount") and lock:get_field("_GmBaseData"):get_field("_IsDone")
-    end)
-    return ok and open == true
+    local ok, locked = pcall(lock.get_field, lock, "_IsCurrLock")
+    return ok and locked == false
 end
 
 local function apply_trigger(data)
@@ -2175,6 +2176,27 @@ local function apply_trigger(data)
     local e = trigger_index(t_now).by_key[key] or trigger_index(t_now, true).by_key[key]
     if e == nil then return "missing" end -- not indexed (yet), or not loaded here
     if e.lock and lock_open(e.lock) then return end
+    -- the partner's data has counted this unlock already, and the lock counts it again when the trigger
+    -- fires (on its next update): one off first, so it lands on the partner's count (a lock that wants
+    -- two keys must not open on one)
+    local d = e.lock and e.lock:get_field("_GmLockData")
+    local count = d and d:get_field("_UnlockCount")
+    local unlocks = false
+    local okp, params = pcall(function() return e.lock:get_field("_UnlockParams"):get_elements() end)
+    for _, prm in ipairs(okp and params or {}) do
+        if prm:get_field("_TriggerName") == name then unlocks = true end
+    end
+    if unlocks then
+        -- The partner's data for this lock, written just now, makes the lock drop the unlock: it waits
+        -- until the lock has written its own state back (half a second), and the partner's data after
+        -- it waits until the lock has opened.
+        if t_now - (gim.applied_at[id] or -10) < 0.5 then return "wait" end
+        if count and count > 0 then
+            d:set_field("_UnlockCount", count - 1)
+            pcall(d.call, d, "onDirty")
+        end
+        gim.hold[id] = t_now + 1.0
+    end
     gim.trigger_applying = true
     pcall(e.trig.call, e.trig, SIG_TRIGGER_PROCESS, e.go)
     gim.trigger_applying = false
@@ -2243,13 +2265,14 @@ gim.gui_tick = function()
         local ok, err
         if m.kind == MSG_GIMMICK then
             ok, err = pcall(apply_gimmick, m.data)
+            if ok and err == "held" then gim.queue[#gim.queue + 1] = m end
         elseif m.kind == MSG_GIMMICK_FLAGS then
             ok, err = pcall(apply_gimmick_flags, m.data)
         elseif m.kind == MSG.GIMMICK_TRIGGER then
             ok, err = pcall(apply_trigger, m.data)
             -- the gimmick may not be indexed yet: try again for 10 s (if it isn't loaded here at all,
             -- its data follows with the state sync)
-            if ok and err == "missing" then
+            if ok and (err == "missing" or err == "wait") then
                 m.till = m.till or now() + 10
                 if now() < m.till then gim.queue[#gim.queue + 1] = m end
             end
@@ -2259,7 +2282,7 @@ gim.gui_tick = function()
 end
 
 gimmick_reset = function()
-    gim.sig, gim.sent_at, gim.applied_at, gim.contexts, gim.cursor, gim.out = {}, {}, {}, nil, 1, {}
+    gim.sig, gim.sent_at, gim.applied_at, gim.contexts, gim.cursor, gim.out, gim.hold = {}, {}, {}, nil, 1, {}, {}
     gim.queue, gim.triggers, gim.trig_sent = {}, { by_addr = {}, by_key = {}, t = 0, chapter = "", forced = 0 }, {}
     gim.ids, gim.by_id = {}, {}
     gim.full_pending, gim.full_done_for, gim.flags_sent = nil, nil, { -1, -1 }
