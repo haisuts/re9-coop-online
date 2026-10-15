@@ -418,6 +418,47 @@ Reason: REFramework is the community loader for RE Engine; Lua can't open socket
   the owner's enemy (boss HP stayed 6000); ending the test gave the boss its AI back (it walked off).
 - Joint lists are capped at 255 (the count is a byte); C100 has 100, players 68 / 84.
 
+## v0.9.0 (2026-10-15) — game over, cutscenes, partner marker, drops, reconnect
+
+- Game over: "Вы погибли" -> "Продолжить" loads the last SAVE (not a separate checkpoint). With a
+  partner up, a player down for 30 s now comes to next to them (teleport + 35% HP). Loads announce
+  themselves (MSG.LOADED); the partner who stayed answers STAYED and resends story (MSG.STORY_FWD:
+  forward only), gimmicks, box, recipes and its own pickups; a host that just loaded waits 4 s first.
+- Cutscenes: `app.TimelineEventMediator` (managed singleton) `skip(System.Object)` is what the pause
+  menu calls (caller `GuiPauseMenuController.Unit`); null throws, the mediator itself as the caller
+  works. Current event: `_ActiveEvents` (TimelineEventProcess) `<TimelineEventId>k__BackingField`
+  (e.g. 312700 = c312s700, 410201). Fades: `app.FadeManager` isFadeOut(FadeType), requestFadeIn;
+  FadeType INTER_GAMESTATE 0, GAMESTATE 1, SCENARIO_JUMPER 2, GUI 3, EVENT 4, PLAYER_MODE 5,
+  GIMMICK 6, POTOMODE 7, WAITLOAD 8, BATTLE_READY 9. Jumping straight into Chap3_10 and skipping its
+  intro (even with the game's own menu) leaves the EVENT fade out in Chap3_02 with no control: an
+  out-of-order jump artefact. Jump names: "Chap4_10" works, "Chap4_1020" (a folder) reloads.
+- Map: `app.UI2500GuiBehavior` (map screen, open while its GameObject DrawSelf). Player icon
+  `_PlayerIconControl` (via.gui.Panel) GlobalPosition in 1920x1080 GUI space; `_PlayerPosition` is in
+  map units; `_ZoomMagnification`; `_DisplayRange` (via.gui.Rect, centre 960,588, size 1284x616);
+  floor maps: 20.48 map units per metre, world x -> right, z -> down (Chap3_02 calibration).
+  NPC icons exist (NpcIconNum 4) but take their positions from the floor data.
+- Enemy drops: `ItemManager.requestGenerateItem(ItemAmountData, via.Position, via.Quaternion,
+  ItemGenerateRequestType, Action, Action)`; request types Unknown, ReliefCh (enemy), ReliefGm,
+  SpawnCh, SpawnGm, DropResource; generated items carry `ItemCore._GenerateType`. Enemy relief drops
+  are a lottery per player (`requestLotteryReliefItem`); zombies in Chap3_02 have
+  `<IsPermitedItemDropnOnDead>` false and dropped nothing even with it on. `app.ItemAmountData` can't
+  be created from Lua (create_instance nil); `Inventory.PanelState.deployAmountData()` gives an
+  `app.ItemStockData` (`_ItemID` string, `_Stock`) to fill in with set_ItemID.
+- Box race: a partner's "-panel" that no longer matches, for a panel we took out < 10 s ago.
+- Reconnect: net plugin states idle / creating / joining / in_lobby / error; ids are strings.
+  Tested with `re9coop_net.status / join / friends` stubbed (no real Steam lobby made).
+- Leon and Grace together (research, not done): `CharacterManager.getPlayerContextID(kind)` gives an
+  id for every playable character in every chapter; the chapter's player comes from
+  `app.LevelPlayerCreateController` (`_DefaultPlayer` CreateSetting: `_ControlCharaId` "cp_A100",
+  montage 200/2; `_OtherInitPlayerArray`, `createOtherCharacter()`, `suspendOtherCharacter()`), and
+  `CharacterManager.SwitchPlayerControlChecker.requestSwitch` moves control. requestSpawn for Leon's id
+  in Chap3_02 and an extra CreateSetting + createOtherCharacter() both did nothing (no spawn data /
+  resources for him there).
+- Tools: `luacheck --globals file.lua` lists every global read/write from the bytecode (GETTABUP /
+  SETTABUP on _ENV); globals_check.py uses it. It found `T_MEDIATOR` read out of its scope (the cause
+  of a load error) and `rig_enable` called before its local was declared (the puppet's torch stayed on
+  when the partner was hidden).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
