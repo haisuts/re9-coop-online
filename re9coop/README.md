@@ -83,9 +83,8 @@ from it is used.
   Решённая загадка сразу выглядит решённой и у напарника: шкафчик с монетами открыт (предмет внутри
   можно взять), сейф с солнечным кварцем открыт, штриховка в блокноте показывает записку, в окне
   двери «солнце / луна / звезда» видны вставленные эмблемы, лунный кварц выдвинут из шкафа.
-  Исключения: лампа, разбитая выстрелом в Chap3_01, у напарника продолжает гореть; загадка с образцом
-  под лазером в больнице у напарника выглядит нерешённой (её можно пройти ещё раз и увидеть тот же
-  код). То, что они открывают (сюжет, двери, флаги), передаётся сразу.
+  Исключение: висячие лампы в Chap3_01 (свет, на который реагирует преследователь) могут погаснуть в
+  одной игре и продолжать гореть в другой; их выключатель общий.
 - **Рецепты крафта — обоим:** рецепт, открытый одним (записка с рецептом, анализ пробы крови на
   лазерном микроскопе), открывается и у напарника (с пометкой «новое»).
 - **Не встал — очнулся рядом с напарником:** если вас не подняли за 30 секунд, вы приходите в себя
@@ -262,9 +261,8 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Of the items the game makes during play, only enemy drops are shared; anything else it spawns is
   each player's own.
-- A hanging lamp shot out in Chap3_01 stays lit in the partner's game. The specimen puzzle in the
-  hospital (rotating it under the laser) shows as not done to the partner, who can do it to read
-  the same code. What they unlock (story, doors, flags) is shared at once.
+- The hanging lamps in Chap3_01 (lights the stalker reacts to) can go out in one game and stay lit
+  in the other; their light switch is shared.
 - A boss (and any enemy) attacks only the player who runs it; the other player can't be hurt by it.
 - Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying

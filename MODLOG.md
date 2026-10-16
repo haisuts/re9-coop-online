@@ -528,8 +528,19 @@ down, the hint panel), recordings played back as the partner on a fresh game, an
 - Not needed: Gm99_101 moon quartz cabinet (its GmMotionData index brings the quartz out, the
   partner can take it), Gm99_110 (a hint panel with three code plates: only _HasInteracted), Gm99_105
   (the monitor rewrites its data from its runtime: follows the heart / lung slots).
-- Left: Gm19_066 hanging lamp (Chap3_01): neither onStart nor assign reads BurnOut (_ActionType 4).
-  Gm99_081V2 specimen puzzle: not examined further (the partner can solve it to read the code).
+- Gm99_081V2 is not a puzzle of its own: it is the molecule puzzle inside the laser microscope
+  (Gm99_054). Its "PuzzleStart" / "Success1..4" are GmStructureData triggers on its own data
+  (PuzzleNo, IsSuccess), its "Success" / "Cancel" send PuzzleEndCommand to Gm99_054Data. Its result
+  (recipes) is shared since v0.8.0 and the partner's microscope takes the done state: nothing to do.
+- Gm99_099 sits in the cabin of the big machine of the bulldozer scene (Gm99_098; head joint ~4 m up,
+  out of sight from the floor): its death is caught up by onStart, and its data trigger "Dead" fires
+  in the partner's game from the data alone, for the gimmicks waiting on it.
+- Left: Gm19_066 hanging lamps (Chap3_01) light zones for the stalker (GmStructureDataLightZoneSwitcher
+  with Cp_B800LightingControl, GmIlluminationData index 1 = zone off); they light from the wall switch
+  Gm18_001 (GmSwitchData index 1 -> lamp ProgressIndex 1), which is shared. Their BurnOut
+  (_ActionType 4) isn't read by onStart or assign, GmIlluminationV2 writes its data back from its
+  runtime, app.DamageInfo can't be created from Lua, and Chap3_01 entered by a chapter jump starts
+  with a fixed camera and no control (Esc opens the pause menu, W doesn't move): not reproduced.
 - Codes: Gm99_101 Moon Sun Star Moon (buttons 0 Star, 1 Sun, 2 Moon), Gm99_102 Star Sun Moon Sun
   (buttons 0 Sun, 1 Moon, 2 Star): `_CorrectMarks`. Gm99_108 needs 29 of 60 cells
   (`_NumOfPaintedCells`); its pencil item could be skipped by firing UseKeyItem_Success (then Esc).
