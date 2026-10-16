@@ -501,6 +501,57 @@ puzzle_sweep.py, puzzle_report.py).
 - Warping straight into another room right after a load can drop the player through the world (to
   y -469, then a game over): its collision isn't there yet.
 
+## v0.9.2 (2026-10-16) — solved puzzles look solved for the partner
+
+Method as in v0.9.1, now with the game's own controls on the solver side (a coin locker with the
+coin count screen, the two quartz cabinets with A / D / F, the pencil rubbing with the mouse held
+down, the hint panel), recordings played back as the partner on a fresh game, and screenshots.
+
+- The running copy of most puzzles reads its data only when it starts, as after a load: onStart(),
+  IStructureDataUser.assignDataContainer(SDC), or its own reform method. Called right after the
+  partner's data is written (in the GUI update), the puzzle catches up the way a load would
+  (gim.catch_up in the mod; only when set up, idle (_StepType 0 or none) and behind the data):
+  - Gm02_032 coin lockers: onStart when data _Unlock and runtime not: the glass door goes down
+    (local y 0.92 -> -0.08, as on the solver) and the item inside can be taken (hip pouch, steroids,
+    unlock manual seen).
+  - Gm99_102 sun quartz safe: reformOpenState when data _Success: the door turns 110 degrees; the
+    sun quartz and the leather notebook inside can be taken.
+  - Gm99_108 pencil rubbing: assignDataContainer when data _Success and runtime not: opening the
+    notebook shows the shaded page with MOON SUN STAR MOON and the "chairman's note"; the partner
+    gets the document. (onStart doesn't read it.)
+  - Gm02_016 sun / moon / star door: onStart when data _SetType differs: the emblems put in show in
+    its window (checked with sun, then sun + moon); putting in the star afterwards worked as usual
+    (one emblem, no double handling after two restarts).
+  - Gm99_099 (a talking "pilot" in a helmet behind a grate, HP 50, Dead 5 / DeadCrash 6): onStart
+    when data _State >= 5 sets the runtime dead (_State 5, IsStateDead). Not seen on screen (too
+    dark), not killed for real (the revolver had no matching ammo).
+- Not needed: Gm99_101 moon quartz cabinet (its GmMotionData index brings the quartz out, the
+  partner can take it), Gm99_110 (a hint panel with three code plates: only _HasInteracted), Gm99_105
+  (the monitor rewrites its data from its runtime: follows the heart / lung slots).
+- Left: Gm19_066 hanging lamp (Chap3_01): neither onStart nor assign reads BurnOut (_ActionType 4).
+  Gm99_081V2 specimen puzzle: not examined further (the partner can solve it to read the code).
+- Codes: Gm99_101 Moon Sun Star Moon (buttons 0 Star, 1 Sun, 2 Moon), Gm99_102 Star Sun Moon Sun
+  (buttons 0 Sun, 1 Moon, 2 Star): `_CorrectMarks`. Gm99_108 needs 29 of 60 cells
+  (`_NumOfPaintedCells`); its pencil item could be skipped by firing UseKeyItem_Success (then Esc).
+- BUG FIXED, settings sent as 0: gimmick states are read from store()'s copy, which leaves some
+  settings out (they read 0 / false there): GmLockData._MaxUnlockCount (29-40 locks per chapter),
+  GmSwitchData._IndexCount / GmMotionData._IndexCount (hundreds), GmDoorData._IsDoubleDoorClose,
+  GmElevatorButtonData._IsButtonInteractable, the _PlaceIDHash of safes, containers and symbols
+  (census of store() vs the live data in Chap1_01, 3_02, 3_05, 4_10, 5_02). They were written into
+  the partner's live data with every state message ("0 keys needed", "0 positions"). Never sent and
+  never written now (gim.unsaved). A lock didn't open early from it (sun alone: still locked).
+- BUG FIXED, a coin locker sent twice a second for good: GmStructureData triggers fire from data
+  conditions; an open locker's "Unlock" fires every frame while Gm02_032Data._Unlock is true and its
+  lock adds one each time (UnlockCount 6691 after a minute), so its fingerprint never settled. The
+  count is now sent capped at what the lock needs (the live _MaxUnlockCount).
+- Gm02_028 (a key lock on the sun quartz safe) is unlocked by the safe's code, with no trigger: on
+  the partner its data says open, its _IsCurrLock stays true (lock onStart doesn't change it); the
+  safe door and its items are right.
+- A chapter jump keeps the stage's gimmick data (data written in Chap3_02 was still there in
+  Chap3_20); after a jump the screen can stay black until FadeManager.requestFadeIn.
+- In Chap3_02 the side of the sun / moon / star door facing -z (z < 23.5) isn't loaded at the start:
+  warping there is a fall; its window is seen from z 25 (its "Item" child at y 5.93).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

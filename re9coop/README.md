@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.9.1
+# RE9 Co-op (online) — v0.9.2
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -21,6 +21,9 @@ from it is used.
   into puzzle slots count for both; switch positions and other gimmick states follow as soon as the
   partner is near them. Gimmicks in areas the partner hasn't loaded take the state when they load.
   Either player can solve a puzzle: the guest's solution counts in the host's game the same way.
+  Solved puzzles look solved for the partner at once: a coin locker opens (its item can be taken),
+  the sun quartz safe opens, the pencil rubbing shows the note, the sun / moon / star door shows the
+  emblems put in, the moon quartz comes out of its cabinet.
 - **Crafting recipes for both**: a recipe one player unlocks (a recipe file, the blood analysis at the
   laser microscope) is unlocked in the partner's game too, marked as new.
 - **Boss fights**: a boss is run by one player for the whole fight (the one nearer when it appears),
@@ -77,11 +80,12 @@ from it is used.
   тут же открывается и у другого — без сцены с его персонажем и не отнимая у него управление; предметы, вставленные в загадку,
   засчитываются обоим; положения переключателей и другие состояния подтягиваются, когда напарник
   рядом с ними. Загадку может решить любой из двоих — решение гостя засчитывается в игре хоста так же.
-  Исключения: несколько загадок в больнице (Chap3_02 / 3_20: штриховка карандашом, панели в четыре
-  шага, мониторы и радио) и одна в Chap3_01 выглядят решёнными у напарника только после загрузки игры
-  (сохранение или «продолжить»); то, что они открывают (сюжет, двери, флаги), передаётся сразу. На
-  двери «солнце / луна / звезда» напарник может не видеть уже вставленные эмблемы — открывается она
-  правильно.
+  Решённая загадка сразу выглядит решённой и у напарника: шкафчик с монетами открыт (предмет внутри
+  можно взять), сейф с солнечным кварцем открыт, штриховка в блокноте показывает записку, в окне
+  двери «солнце / луна / звезда» видны вставленные эмблемы, лунный кварц выдвинут из шкафа.
+  Исключения: лампа, разбитая выстрелом в Chap3_01, у напарника продолжает гореть; загадка с образцом
+  под лазером в больнице у напарника выглядит нерешённой (её можно пройти ещё раз и увидеть тот же
+  код). То, что они открывают (сюжет, двери, флаги), передаётся сразу.
 - **Рецепты крафта — обоим:** рецепт, открытый одним (записка с рецептом, анализ пробы крови на
   лазерном микроскопе), открывается и у напарника (с пометкой «новое»).
 - **Не встал — очнулся рядом с напарником:** если вас не подняли за 30 секунд, вы приходите в себя
@@ -189,6 +193,11 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   and played back as the partner: every field of the lock matches, the partner's controls stay free;
   the heart / lung slots again; every puzzle type of every loadable chapter checked for whether its
   state follows the partner's data.
+- v0.9.2: a coin locker, the moon and sun quartz cabinets, the pencil rubbing and the hint panel
+  solved for real (by the game's own controls), then played back as the partner on a fresh game:
+  the locker's glass door opens and its item can be taken, the safe opens with its items, the
+  notebook shows the note and gives the document, the emblems show in the door window, and putting
+  in an emblem afterwards works as usual.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
@@ -253,11 +262,9 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Of the items the game makes during play, only enemy drops are shared; anything else it spawns is
   each player's own.
-- A few puzzles in the hospital (Chap3_02 / 3_20: the pencil rubbing, the four-step panels, the
-  monitors and radios) and one in Chap3_01 show their solved state in the partner's game only after
-  the game loads (a save or a continue); what they unlock (story, doors, flags) is shared at once.
-  On the sun / moon / star door the partner may not see the emblems already put in (the door still
-  opens right).
+- A hanging lamp shot out in Chap3_01 stays lit in the partner's game. The specimen puzzle in the
+  hospital (rotating it under the laser) shows as not done to the partner, who can do it to read
+  the same code. What they unlock (story, doors, flags) is shared at once.
 - A boss (and any enemy) attacks only the player who runs it; the other player can't be hurt by it.
 - Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying

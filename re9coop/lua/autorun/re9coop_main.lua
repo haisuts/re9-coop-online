@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.9.1"
+local VERSION = "0.9.2"
 local PROTO = 8
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -1869,6 +1869,36 @@ local T_BASE_DATA = "app.structure.GmBaseData"
 local FINISHERS = { { sdk.typeof("app.GmSafe"), "forceOpen" }, { sdk.typeof("app.GmContainer"), "forceOpen" } }
 
 gim = {
+    -- settings store() leaves out of its copy (there they read 0 / false): never sent, never written.
+    -- Sent, they set the partner's lock to "0 keys needed" and their switches and motions to 0 positions.
+    unsaved = {
+        ["app.structure.GmLockData._MaxUnlockCount"] = true,
+        ["app.structure.GmMotionData._IndexCount"] = true,
+        ["app.structure.GmSwitchData._IndexCount"] = true,
+        ["app.structure.GmDoorData._IsDoubleDoorClose"] = true,
+        ["app.structure.GmElevatorButtonData._IsButtonInteractable"] = true,
+        ["app.structure.GmSafeData._PlaceIDHash"] = true,
+        ["app.structure.GmContainerData._PlaceIDHash"] = true,
+        ["app.structure.GmFragileSymbolData._PlaceIDHash"] = true,
+    },
+    lock_data = { "app.structure.GmLockData", sdk.typeof("app.structure.GmLockData") },
+    -- puzzles whose running copy reads its data only when it starts (as after a load): when the partner's
+    -- data is ahead of ours, ours is started again from that data, re-reads it ("assign") or reforms itself.
+    -- { component, data type, data field, runtime field (nil: once per chapter), method, lowest number };
+    -- a true data field catches up a false runtime one, a number (from the lowest on) any other number
+    catch_up = {
+        -- coin lockers: the glass door opens and the item inside can be taken
+        { sdk.typeof("app.Gm02_032"), "app.structure.Gm02_032Data", "_Unlock", "_Unlock", "onStart" },
+        -- the safe with the sun quartz: its door opens
+        { sdk.typeof("app.Gm99_102"), "app.structure.Gm99_102Data", "_Success", nil, "reformOpenState" },
+        -- the pencil rubbing: the notebook opens shaded, with the note
+        { sdk.typeof("app.Gm99_108"), "app.structure.Gm99_108Data", "_Success", "_Success", "assign" },
+        -- the sun / moon / star door: the emblems put in show in its window
+        { sdk.typeof("app.Gm02_016"), "app.structure.Gm02_016Data", "_SetType", "_SetType", "onStart" },
+        -- the talking pilot in the hospital: dead (Dead 5, DeadCrash 6) once shot dead there
+        { sdk.typeof("app.Gm99_099"), "app.structure.Gm99_099Data", "_State", "_State", "onStart", 5 },
+    },
+    caught = {},          -- context id -> caught up already (catch_up entries with no runtime field)
     fields = {},          -- structure type name -> { {name, tag}, ... } (logical fields only)
     sig = {},             -- context id -> last known fingerprint
     sent_at = {},         -- context id -> last send time (rate limit)
@@ -1901,7 +1931,7 @@ local function logical_fields(obj)
         local t = td
         while t and t:get_full_name() ~= "app.StructureData" and t:get_full_name() ~= "System.Object" do
             for _, fl in ipairs(t:get_fields()) do
-                if not fl:is_static() then
+                if not fl:is_static() and not gim.unsaved[tname .. "." .. fl:get_name()] then
                     local ft = fl:get_type()
                     local fname = ft:get_full_name()
                     if fname == "System.Boolean" then
@@ -1929,10 +1959,18 @@ local function gimmick_state(gc)
     if list == nil then error("unreadable") end -- skipped this time, not taken for a change
     for _, x in ipairs(list) do
         local tname, fields = logical_fields(x)
+        -- an open coin locker adds to its lock's count every frame: counted up to what the lock needs,
+        -- or it would be sent twice a second for good
+        local cap
+        if tname == gim.lock_data[1] then
+            local okc, live = pcall(function() return gc:call("get_SDC"):call("getStructureData(System.Type)", gim.lock_data[2]) end)
+            cap = okc and live and live:get_field("_MaxUnlockCount")
+        end
         for _, fd in ipairs(fields) do
             local ok, v = pcall(x.get_field, x, fd[1])
             if ok and v ~= nil then
                 local num = fd[2] == T_BOOL and (v and 1 or 0) or (type(v) == "number" and math.floor(v) or 0)
+                if cap and cap > 0 and num > cap and fd[1] == "_UnlockCount" then num = cap end
                 entries[#entries + 1] = { tname, fd[1], fd[2], num }
                 parts[#parts + 1] = num
             end
@@ -2042,12 +2080,13 @@ local function apply_gimmick(data)
     end
     for i = 0, count - 1 do
         local x = list:call("get_Item", i)
-        local w = x and want[x:get_type_definition():get_full_name()]
+        local xt = x and x:get_type_definition():get_full_name()
+        local w = xt and want[xt]
         if w then
             local dirty = false
             for fname, v in pairs(w) do
                 local ok, cur = pcall(x.get_field, x, fname)
-                if ok and cur ~= v then
+                if ok and cur ~= v and not gim.unsaved[xt .. "." .. fname] then
                     x:set_field(fname, v)
                     dirty = true
                 end
@@ -2062,6 +2101,30 @@ local function apply_gimmick(data)
     if changed then
         gim.applied_at[id] = now()
         gim.stats.applied = gim.stats.applied + 1
+    end
+    local body = gc:call("get_BodyGameObject")
+    for _, cu in ipairs(gim.catch_up) do
+        local v = want[cu[2]] and want[cu[2]][cu[3]]
+        local comp = v and v ~= 0 and (cu[6] == nil or v >= cu[6]) and body and body:call("getComponent(System.Type)", cu[1])
+        -- set up already, nobody busy with it here (if it has steps), and behind the data
+        local okst, step = pcall(function() return comp and comp:get_field("_StepType") end)
+        if comp and comp:call("get_IsAlreadySetup") == true and (not okst or step == nil or step == 0) then
+            local behind
+            if cu[4] == nil then behind = not gim.caught[id]
+            elseif v == true then behind = comp:get_field(cu[4]) == false
+            else behind = comp:get_field(cu[4]) ~= v end
+            if behind then
+                gim.caught[id] = true
+                local ok
+                if cu[5] == "assign" then
+                    local m = comp:get_type_definition():get_method("app.IStructureDataUser.assignDataContainer(app.StructureDataContainer)")
+                    ok = m ~= nil and pcall(m.call, m, comp, gc:call("get_SDC"))
+                else
+                    ok = pcall(comp.call, comp, cu[5])
+                end
+                if ok then gim.stats.caught = (gim.stats.caught or 0) + 1 end
+            end
+        end
     end
     local ok, _, sig = pcall(gimmick_state, gc)
     if ok then gim.sig[id] = sig end -- what we now have is not a change of ours
@@ -2283,6 +2346,7 @@ end
 
 gimmick_reset = function()
     gim.sig, gim.sent_at, gim.applied_at, gim.contexts, gim.cursor, gim.out, gim.hold = {}, {}, {}, nil, 1, {}, {}
+    gim.caught = {}
     gim.queue, gim.triggers, gim.trig_sent = {}, { by_addr = {}, by_key = {}, t = 0, chapter = "", forced = 0 }, {}
     gim.ids, gim.by_id = {}, {}
     gim.full_pending, gim.full_done_for, gim.flags_sent = nil, nil, { -1, -1 }

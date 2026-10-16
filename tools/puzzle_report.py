@@ -11,7 +11,11 @@ import os
 DIR = r"E:\SteamLibrary\steamapps\common\RESIDENT EVIL requiem BIOHAZARD requiem\reframework\data\re9coop_bridge"
 FINISHERS = {"GmSafe", "GmContainer"}
 CHECKED = {"Gm99_054": "microscope: recipes shared, verified", "Gm99_104": "heart / lung: slots replayed, verified",
-           "GmMultipleUseKeyItem": "item slots replayed, verified"}
+           "GmMultipleUseKeyItem": "item slots replayed, verified",
+           "Gm02_032": "coin locker: caught up (onStart), verified", "Gm99_102": "sun safe: caught up (reformOpenState), verified",
+           "Gm99_108": "pencil rubbing: caught up (assign), verified", "Gm02_016": "emblem door: caught up (onStart), verified",
+           "Gm99_099": "pilot: caught up when dead (onStart)", "Gm99_101": "moon cabinet: motion data brings the quartz out, verified",
+           "Gm99_110": "hint panel: only a 'seen' flag", "Gm99_105": "monitor: follows the heart / lung slots"}
 
 
 def main():
@@ -30,7 +34,9 @@ def main():
                 (t["follows"] if res == "follows" else t["rewritten"] if res.startswith("data") else t["stays"]).add(field)
     for tn in sorted(types):
         t = types[tn]
-        if t["lock"]:
+        if tn in CHECKED and t["lock"]:
+            how = "lock: opens live (unlock trigger); " + CHECKED[tn]
+        elif t["lock"]:
             how = "lock: opens live (unlock trigger)"
         elif t["slots"] or tn in CHECKED:
             how = CHECKED.get(tn, "item slots: live")
