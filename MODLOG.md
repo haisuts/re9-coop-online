@@ -649,6 +649,53 @@ around.
   lobby by itself (auto-rejoin); left at once, nobody had joined. The dev bridge now sets
   _G.re9coop_test_no_rejoin.
 
+## v0.11.0 (2026-10-18) — the guest loads the host's world
+
+The second real session (host's log, the friend's report): items came back for the guest after
+rejoining and every cutscene played again, the guest's box things were gone after rejoining, doors
+stuck for the host, enemies stood in different places in the two games. The guest's new game (v0.10)
+was a world of its own: the mod only patched parts of it (flows, gimmicks, box), not the items the
+host had taken, the enemies killed, the events seen.
+
+- Saves can't be handed over as files: they are encrypted per Steam account (the save service's
+  encryption seed is the Steam ID). Not pursued.
+- The game's save handlers instead (SaveServiceManager._GameSlotSaveHandlers, 37: CharacterManager,
+  EventSaveManager (_EndTimelineEventArray: events seen), ItemManager (_PickedupItemHashes,
+  _ItemBackups), GimmickManager, LevelFlowManager, MainGameFlowManager (the scene), ...): each
+  implements IGameSlotSaveHandler.createGameSlotSavedata (what a save writes) and
+  restoreGameSlotSavedata (what a load reads). Loading any save while every restore gets another
+  game's created objects in place of the file's (sdk.hook pre, args[3] replaced) brings that world up
+  exactly: a save of Leon in Chap3_20 came up as the captured Chap3_02 with Grace, to the centimetre.
+- ext.worldx packs those objects for the network: types and field lists once; numbers, enums and
+  structs without references as raw bytes (field offsets get_offset_from_base for objects,
+  get_offset_from_fieldptr in structs, array data from 0x20 with the element size); strings and
+  references through get_field / set_field (reference counting); arrays of base types keep their
+  element type (names like "Dictionary`2.Entry[[A, asm..],[B, asm..]]" turned into "Entry<A,B>" for
+  find_type_definition / create_managed_array); dictionaries and hash sets as plain objects (their
+  _buckets / _entries copied; comparers left to the constructor). Named-constant objects (static
+  fields of their own type, e.g. GuiMapSectionVariationID) go by name and are the same statics on
+  the other side (copies broke hash sets keyed by them). Not packed: InventoryManager (it references
+  the item catalog; the guest's things come from the kit, the box from the box sync),
+  LayeredParamManager (flashlight user data), AchievementManager. 11.9k objects, 707 KB JSON,
+  0.3 s to pack, 0.2 s to unpack; packed and unpacked again it matched itself field for field.
+- The flow: the guest at the main menu asks (PLAY_REQ start); the host answers PLAY and sends its
+  world (MSG.WORLD, 60 KB pieces, two a frame, a piece Steam can't queue yet tried again); a guest
+  with a save of their own "Continues" (TitleFlowController.onContinue) with the restores taking the
+  host's world; arrival = a new player object; then the kit as before. A guest without a save: the
+  v0.10 new game. No world within 40 s: the new game too. The host sends its world again whenever it
+  saves; a load in the co-op playthrough (game over, "Load") uses the last one, and asks for a new one.
+  Verified on one PC (loopback for the network part, the title flow by feeding the pieces in): 5 s
+  from the last piece to the player, control after the game's own fade.
+- Rejoin: the lobby owner kept a partner who left as "synced" and sent nothing when they came back
+  (story, gimmicks, box, recipes): the guest's box things were missing and their world unpatched.
+  Now leaving (drop_peer) or starting a co-op playthrough clears that partner's sync, and the pickups
+  made here go with every whole-world send.
+- Doors: GmDoorV3.ActionType Lock (3, a locked door's rattle), Const and MotionSync aren't shared any
+  more, only pushes (Normal, UniformSpeed), and a partner's push on a door we pushed in the last 1.5 s
+  is dropped (ours and theirs fighting). A door locked in the guest's game made the host's rattle shut.
+  Not reproduced on one PC.
+- PROTO 10 (MSG.WORLD 36).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

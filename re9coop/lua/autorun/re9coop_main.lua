@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.10.1"
-local PROTO = 9
+local VERSION = "0.11.0"
+local PROTO = 10
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -334,7 +334,7 @@ local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
-    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35 }
+    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
@@ -800,6 +800,7 @@ local function drop_peer(id)
     if p == nil then return end
     if p.puppet then p.puppet:destroy() end
     peers[id] = nil
+    if ext.on_peer_left then pcall(ext.on_peer_left, id) end
     say("%s left", p.name)
 end
 
@@ -920,7 +921,7 @@ local function on_ctrl(from, data)
         ext.cut_ctrl(from, kind, data)
     elseif (kind == MSG.DROP or kind == MSG.DROP_TAKEN) and ext.drops_ctrl then
         ext.drops_ctrl(from, kind, data)
-    elseif kind >= MSG.PLAY_REQ and kind <= MSG.KIT and ext.fresh_ctrl then
+    elseif kind >= MSG.PLAY_REQ and kind <= MSG.WORLD and ext.fresh_ctrl then
         ext.fresh_ctrl(from, kind, data)
     end
 end
@@ -1695,6 +1696,10 @@ end
 local world, world_shared, world_late
 do
 local DOOR_AUTO_CLOSE = 1
+-- GmDoorV3.ActionType: only pushes are shared (Normal 0, UniformSpeed 2); Lock 3 is a locked door's
+-- rattle (a door still locked in the partner's game made ours rattle shut and not let us through),
+-- Const / MotionSync belong to the pusher's own animation
+local DOOR_SHARED = { [0] = true, [2] = true }
 local T_DOOR_REQUEST = "app.GmDoorV3.RequestInfo"
 local M_DOOR_FORCE = sdk.find_type_definition("app.GmDoorV3"):get_method("addForce(app.GmDoorV3.RequestInfo)")
 local M_ITEM_PICKED = sdk.find_type_definition("app.ItemCore"):get_method("notifyPickupped(System.Boolean)")
@@ -1770,7 +1775,9 @@ sdk.hook(M_DOOR_FORCE, function(args)
     local info = sdk.to_managed_object(args[3])
     if info == nil then return end
     local action = info:get_field("ActionType")
-    if action == DOOR_AUTO_CLOSE or #world.out >= 32 then return end
+    world.mine_at = world.mine_at or {}
+    world.mine_at[id] = t
+    if not DOOR_SHARED[action or 0] or action == DOOR_AUTO_CLOSE or #world.out >= 32 then return end
     world.sent_at[id] = t
     world.out[#world.out + 1] = string.pack("<Bs1s1BfI4", MSG_DOOR, me.chapter, id, action or 0,
         info:get_field("Force") or 1.0, (info:get_field("ForceDir") or 1) & 0xFFFFFFFF)
@@ -1818,7 +1825,9 @@ world_ctrl = function(from, kind, data)
     if kind == MSG_DOOR then
         local _, chapter, id, action, force, dir = string.unpack("<Bs1s1BfI4", data)
         local door = chapter == me.chapter and world.doors[id]
-        if not door then return end
+        if not door or not DOOR_SHARED[action] then return end
+        -- a door we're pushing ourselves just now: ours (two pushes fighting held it half open)
+        if now() - ((world.mine_at or {})[id] or -10) < 1.5 then return end
         local info = sdk.create_instance(T_DOOR_REQUEST)
         if info == nil then return end
         info:set_field("ActionType", action)
@@ -2585,6 +2594,10 @@ story_late = function(t_now)
         end
         say("sent %d story steps to your partner", n)
         story.stats.sent = story.stats.sent + n
+        if ext.send_pickups then
+            local np = ext.send_pickups(partner.id)
+            if np > 0 then say("sent %d pickups made here to your partner", np) end
+        end
     end
     if #story.wait > 0 and (ext.settled == nil or ext.settled()) then
         local wait = story.wait
@@ -3183,6 +3196,32 @@ ext.sync_scene = function()
     sync.partner_stayed, sync.resync_to = false, nil
 end
 
+-- someone we sent our world to left, or starts afresh (a co-op playthrough): when they're back in this
+-- chapter they get the whole world again (story, gimmicks, box, recipes, our pickups here), as on a
+-- first join. (A rejoining guest got nothing: the owner still had them down as synced.)
+ext.on_peer_left = function(id)
+    if gim.full_done_for == id then gim.full_done_for = nil end
+    if story.full_done_for == id then story.full_done_for = nil end
+    if box.full_done_for == id then box.full_done_for = nil end
+    if ext.recipes and ext.recipes.peer == id then ext.recipes.peer = nil end
+    if sync.resync_to == id then sync.resync_to = nil end
+    sync.pickups_sent = sync.pickups_sent or {}
+    sync.pickups_sent[id] = nil
+end
+
+-- our pickups in this chapter, once to a partner who gets our whole world
+ext.send_pickups = function(to)
+    sync.pickups_sent = sync.pickups_sent or {}
+    if sync.pickups_sent[to] == me.chapter then return 0 end
+    sync.pickups_sent[to] = me.chapter
+    local n = 0
+    for id in pairs(world.taken) do
+        send_ctrl(string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id), to)
+        n = n + 1
+    end
+    return n
+end
+
 ext.loaded_ctrl = function(from, _, data)
     if not world_shared() then return end
     local _, chapter, flag = string.unpack("<Bs1B", data)
@@ -3197,11 +3236,8 @@ ext.loaded_ctrl = function(from, _, data)
     gim.full_done_for, story.full_done_for, box.full_done_for = nil, nil, nil
     if ext.recipes then ext.recipes.peer = nil end
     send_ctrl(string.pack("<Bs1B", MSG.LOADED, me.chapter, STAYED), from)
-    local n = 0
-    for id in pairs(world.taken) do
-        send_ctrl(string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id), from)
-        n = n + 1
-    end
+    if sync.pickups_sent then sync.pickups_sent[from] = nil end
+    local n = ext.send_pickups(from)
     say("your partner is back at a checkpoint: sending them this chapter as it is here (%d pickups)", n)
 end
 
@@ -3449,6 +3485,392 @@ end
 end
 
 -------------------------------------------------------------------------------------------------
+-- the game's world as data
+-------------------------------------------------------------------------------------------------
+-- The save data objects the game's save handlers create (what a save holds: story flows, gimmicks, items
+-- picked up, enemies, events seen...) to a plain table and back, so one game's world can be loaded by
+-- another (see the co-op playthrough). Same game build on both sides.
+-- Non-reference data (numbers, enums, structs without references) is copied as raw bytes (field offsets
+-- from the type info; array elements from 0x20); strings and references are set through set_field so the
+-- engine's reference counting stays right.
+ext.worldx = (function()
+local W = {}
+
+local function skip_type_name(n)
+    return n == "System.Type" or n == "System.RuntimeType" or n:find("Comparer", 1, true) or n:find("^via%.threading%.")
+        or n:find("^System%.Action") or n:find("^System%.Func") or n:find("Delegate", 1, true) or n:find("EventHandler", 1, true)
+        or n:find("^via%.GameObject") or n:find("^via%.Component") or n:find("^via%.Transform")
+end
+
+-- "A`2.Entry[[X, asm, ...],[Y, asm, ...]]" (an array's element name) -> "A`2.Entry<X,Y>"
+local function normalize(name)
+    local i, n = 1, #name
+    local function parse_args()
+        local args = {}
+        i = i + 1 -- the outer "["
+        while i <= n and name:sub(i, i) == "[" do
+            i = i + 1
+            local parts, start = {}, i
+            while i <= n do
+                local c = name:sub(i, i)
+                if c == "[" and name:sub(i + 1, i + 1) == "[" then
+                    parts[#parts + 1] = name:sub(start, i - 1)
+                    parts[#parts + 1] = parse_args()
+                    start = i
+                elseif c == "]" then
+                    parts[#parts + 1] = name:sub(start, i - 1)
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            local a = table.concat(parts):gsub(",%s*[%w%.]+,%s*Version=[^,%]]*,%s*Culture=[^,%]]*,%s*PublicKeyToken=%w+", "")
+            args[#args + 1] = (a:gsub("^%s+", ""):gsub("%s+$", ""))
+            if name:sub(i, i) == "," then i = i + 1 end
+        end
+        i = i + 1 -- the outer "]"
+        return "<" .. table.concat(args, ",") .. ">"
+    end
+    local out = {}
+    while i <= n do
+        if name:sub(i, i + 1) == "[[" then
+            out[#out + 1] = parse_args()
+        else
+            out[#out + 1] = name:sub(i, i)
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+W.normalize = normalize
+
+local PRIM = { ["System.Boolean"] = true, ["System.Byte"] = true, ["System.SByte"] = true, ["System.Int16"] = true,
+    ["System.UInt16"] = true, ["System.Int32"] = true, ["System.UInt32"] = true, ["System.Int64"] = true,
+    ["System.UInt64"] = true, ["System.Single"] = true, ["System.Double"] = true, ["System.Char"] = true,
+    ["System.IntPtr"] = true, ["System.UIntPtr"] = true }
+
+local blit_cache = {}
+local function blittable(td)
+    local n = td:get_full_name()
+    local b = blit_cache[n]
+    if b ~= nil then return b end
+    blit_cache[n] = true
+    b = true
+    for _, f in ipairs(td:get_fields()) do
+        if not f:is_static() then
+            local ft = f:get_type()
+            if not (PRIM[ft:get_full_name()] or ft:is_enum() or (ft:is_value_type() and blittable(ft))) then b = false break end
+        end
+    end
+    blit_cache[n] = b
+    return b
+end
+
+-- "p" raw bytes (numbers, enums, structs without references), "s" string, "v" struct with references, "r" reference
+local function kind_of(ft)
+    local fn = ft:get_full_name()
+    if PRIM[fn] or ft:is_enum() then return "p" end
+    if fn == "System.String" then return "s" end
+    if ft:is_value_type() then return blittable(ft) and "p" or "v" end
+    return "r"
+end
+W.kind_of = kind_of
+
+local size_cache = {}
+local function vsize(td)
+    local n = td:get_full_name()
+    local s = size_cache[n]
+    if s == nil then
+        s = td:get_valuetype_size()
+        size_cache[n] = s
+    end
+    return s
+end
+
+local HEX = {}
+for b = 0, 255 do HEX[b] = string.format("%02x", b) end
+
+-- raw bytes of `o` at [off, off + size) as hex
+local function read_hex(o, off, size)
+    local t = {}
+    local i = 0
+    while i + 8 <= size do
+        local s = string.pack("<i8", o:read_qword(off + i))
+        for k = 1, 8 do t[#t + 1] = HEX[s:byte(k)] end
+        i = i + 8
+    end
+    while i < size do
+        t[#t + 1] = HEX[o:read_byte(off + i) & 0xFF]
+        i = i + 1
+    end
+    return table.concat(t)
+end
+local function write_hex(o, off, hex)
+    local size = #hex // 2
+    local i = 0
+    while i + 8 <= size do
+        local s = hex:sub(i * 2 + 1, i * 2 + 16):gsub("..", function(h) return string.char(tonumber(h, 16)) end)
+        o:write_qword(off + i, (string.unpack("<i8", s)))
+        i = i + 8
+    end
+    while i < size do
+        o:write_byte(off + i, tonumber(hex:sub(i * 2 + 1, i * 2 + 2), 16))
+        i = i + 1
+    end
+end
+W.read_hex, W.write_hex = read_hex, write_hex
+
+local ARRAY_DATA = 0x20
+
+-- classes used as named constants (static fields holding instances of the class itself, like
+-- GameDifficultyID.ID0030): such an object is sent by the static's name and is that same static on
+-- the other side (a copy would be another object: lookups by identity would miss it)
+local statics_cache = {}
+local function static_names(td)
+    local n = td:get_full_name()
+    local m = statics_cache[n]
+    if m then return m end
+    m = {}
+    local t = td
+    while t and t:get_full_name() ~= "System.Object" do
+        for _, f in ipairs(t:get_fields()) do
+            if f:is_static() and f:get_type():get_full_name() == n then
+                local ok, v = pcall(f.get_data, f, nil)
+                if ok and type(v) == "userdata" then m[v:get_address()] = f:get_name() end
+            end
+        end
+        t = t:get_parent_type()
+    end
+    statics_cache[n] = m
+    return m
+end
+
+function W.encode(roots)
+    local types, type_idx = {}, {}
+    local descs = {}  -- type index -> { {name, kind, field type index, offset}, ... }
+    local nodes, node_of = {}, {}
+    local function tidx(td)
+        local n = td:get_full_name()
+        local i = type_idx[n]
+        if i then return i end
+        types[#types + 1] = n
+        i = #types
+        type_idx[n] = i
+        return i
+    end
+    -- instance fields (base types first); offsets from the object start (objects) or the data (structs)
+    local function desc(td, is_struct)
+        local i = tidx(td)
+        if descs[i] then return descs[i], i end
+        local d = {}
+        descs[i] = d
+        local chain, t = {}, td
+        while t and t:get_full_name() ~= "System.Object" and t:get_full_name() ~= "System.ValueType" do
+            chain[#chain + 1] = t
+            t = t:get_parent_type()
+        end
+        for c = #chain, 1, -1 do
+            for _, f in ipairs(chain[c]:get_fields()) do
+                if not f:is_static() then
+                    local ft = f:get_type()
+                    if not skip_type_name(ft:get_full_name()) then
+                        local off = is_struct and f:get_offset_from_fieldptr() or f:get_offset_from_base()
+                        d[#d + 1] = { f:get_name(), kind_of(ft), tidx(ft), off }
+                    end
+                end
+            end
+        end
+        return d, i
+    end
+    local enc_obj
+    local function tdi(i) return sdk.find_type_definition(normalize(types[i])) end
+    -- a struct with references: `src` is a ValueType (data at 0) or a boxed struct (data at 0x10)
+    local function enc_struct(src, base, std)
+        local d = desc(std, true)
+        local out = {}
+        for k, fd in ipairs(d) do
+            local kind = fd[2]
+            if kind == "p" then
+                out[k] = read_hex(src, base + fd[4], vsize(tdi(fd[3])))
+            else
+                local okf, v = pcall(src.get_field, src, fd[1])
+                if not okf or v == nil then out[k] = false
+                elseif kind == "v" then out[k] = enc_struct(v, 0, tdi(fd[3]))
+                elseif kind == "s" then out[k] = type(v) == "userdata" and v:call("ToString") or tostring(v)
+                else out[k] = type(v) == "userdata" and enc_obj(v) or false end
+            end
+        end
+        return out
+    end
+    enc_obj = function(o)
+        local addr = o:get_address()
+        if node_of[addr] then return node_of[addr] end
+        local td = o:get_type_definition()
+        local tn = td:get_full_name()
+        if skip_type_name(tn) then return false end
+        local node = {}
+        nodes[#nodes + 1] = node
+        local id = #nodes
+        node_of[addr] = id
+        node[1] = tidx(td)
+        if not td:is_value_type() and tn:sub(-2) ~= "[]" then
+            local sn = static_names(td)[addr]
+            if sn then
+                node[2], node[3] = "S", sn
+                return id
+            end
+        end
+        if tn:sub(-2) == "[]" then
+            local etd = sdk.find_type_definition(normalize(tn:sub(1, -3)))
+            local len = o:call("get_Length")
+            if etd == nil then node[2] = "a?" return id end
+            local ek = kind_of(etd)
+            node[2], node[3], node[4], node[5] = "a", ek, tidx(etd), len
+            if ek == "p" then
+                node[6] = read_hex(o, ARRAY_DATA, len * vsize(etd))
+            elseif ek == "v" then
+                local items = {}
+                for i = 0, len - 1 do
+                    local okv, b = pcall(o.call, o, "GetValue(System.Int32)", i)
+                    items[i + 1] = (okv and b) and enc_struct(b, 0x10, etd) or false
+                end
+                node[6] = items
+            else
+                local items = {}
+                for i = 0, len - 1 do
+                    local okv, v = pcall(o.call, o, "GetValue(System.Int32)", i)
+                    if not okv or v == nil then items[i + 1] = false
+                    elseif ek == "s" then items[i + 1] = v:call("ToString")
+                    else items[i + 1] = enc_obj(v) end
+                end
+                node[6] = items
+            end
+            return id
+        end
+        local d = desc(td, false)
+        local vals = {}
+        for k, fd in ipairs(d) do
+            local kind = fd[2]
+            if kind == "p" then
+                vals[k] = read_hex(o, fd[4], vsize(tdi(fd[3])))
+            elseif kind == "v" then
+                local okf, v = pcall(o.get_field, o, fd[1])
+                vals[k] = (okf and v) and enc_struct(v, 0, tdi(fd[3])) or false
+            else
+                local okf, v = pcall(o.get_field, o, fd[1])
+                if not okf or v == nil then vals[k] = false
+                elseif kind == "s" then vals[k] = type(v) == "userdata" and v:call("ToString") or tostring(v)
+                else vals[k] = type(v) == "userdata" and enc_obj(v) or false end
+            end
+        end
+        node[2] = vals
+        return id
+    end
+    local root_ids = {}
+    for key, obj in pairs(roots) do root_ids[key] = enc_obj(obj) end
+    local dl = {}
+    for i, d in pairs(descs) do dl[#dl + 1] = { i, d } end
+    return { v = 2, types = types, descs = dl, nodes = nodes, roots = root_ids }
+end
+
+function W.decode(data)
+    local types = data.types
+    local descs = {}
+    for _, e in ipairs(data.descs) do descs[e[1]] = e[2] end
+    local tds = {}
+    local function td_of(i)
+        local t = tds[i]
+        if t == nil then
+            t = sdk.find_type_definition(normalize(types[i])) or false
+            tds[i] = t
+        end
+        return t or nil
+    end
+    local objs, missing = {}, {}
+    for id, node in ipairs(data.nodes) do
+        if node[2] == "a" then
+            local arr = sdk.create_managed_array(normalize(types[node[4]]), node[5])
+            if arr then objs[id] = arr:add_ref() else missing[#missing + 1] = types[node[1]] end
+        elseif node[2] == "S" then
+            local td = td_of(node[1])
+            local f = td and td:get_field(node[3])
+            local ok, v = pcall(function() return f:get_data(nil) end)
+            if ok and v then objs[id] = v else missing[#missing + 1] = types[node[1]] .. "." .. tostring(node[3]) end
+        elseif node[2] ~= "a?" then
+            local o = sdk.create_instance(normalize(types[node[1]]))
+            if o then objs[id] = o:add_ref() else missing[#missing + 1] = types[node[1]] end
+        end
+    end
+    -- a struct with references as a ValueType
+    local function build_struct(ti, vals)
+        local std = td_of(ti)
+        local vt = ValueType.new(std)
+        local d = descs[ti] or {}
+        for k, fd in ipairs(d) do
+            local v = vals[k]
+            if fd[2] == "p" then
+                if v then write_hex(vt, fd[4], v) end
+            elseif fd[2] == "v" then
+                if v then pcall(vt.set_field, vt, fd[1], build_struct(fd[3], v)) end
+            elseif fd[2] == "s" then
+                if v then pcall(vt.set_field, vt, fd[1], sdk.create_managed_string(v)) end
+            else
+                if v then pcall(vt.set_field, vt, fd[1], objs[v]) end
+            end
+        end
+        return vt
+    end
+    for id, node in ipairs(data.nodes) do
+        local o = objs[id]
+        if o and node[2] ~= "S" then
+            if node[2] == "a" then
+                local ek, eti, len, items = node[3], node[4], node[5], node[6]
+                if ek == "p" then
+                    if len > 0 then write_hex(o, ARRAY_DATA, items) end
+                elseif ek == "v" then
+                    for i = 0, len - 1 do
+                        if items[i + 1] then
+                            local vt = build_struct(eti, items[i + 1])
+                            pcall(function() o[i] = vt end)
+                        end
+                    end
+                else
+                    for i = 0, len - 1 do
+                        local v = items[i + 1]
+                        if v then
+                            local x = ek == "s" and sdk.create_managed_string(v) or objs[v]
+                            if x then pcall(function() o[i] = x end) end
+                        end
+                    end
+                end
+            else
+                local d = descs[node[1]] or {}
+                local vals = node[2]
+                for k, fd in ipairs(d) do
+                    local v = vals[k]
+                    if fd[2] == "p" then
+                        if v then write_hex(o, fd[4], v) end
+                    elseif fd[2] == "v" then
+                        if v then pcall(o.set_field, o, fd[1], build_struct(fd[3], v)) end
+                    elseif fd[2] == "s" then
+                        pcall(o.set_field, o, fd[1], v and sdk.create_managed_string(v) or nil)
+                    else
+                        pcall(o.set_field, o, fd[1], v and objs[v] or nil)
+                    end
+                end
+            end
+        end
+    end
+    local roots = {}
+    for key, id in pairs(data.roots) do roots[key] = id and objs[id] or nil end
+    return roots, missing, objs
+end
+
+return W
+end)()
+
+-------------------------------------------------------------------------------------------------
 -- the guest's co-op playthrough
 -------------------------------------------------------------------------------------------------
 -- A guest who brings their own save into the host's world clashes with it: their story, chapter and
@@ -3465,8 +3887,17 @@ end
 -- when the host's game saves, every 2 minutes and when the guest leaves, and put back the next time
 -- they join that host; the first time they get a copy of what the host carries. A guest who joins
 -- while playing their own save is asked to go to the main menu first; until then nothing of the two
--- worlds is shared. A load in the co-op playthrough (a game over, "Restart") loads the guest's own
--- last save: the co-op playthrough ends there (what they carried is kept).
+-- worlds is shared.
+-- The host's world: the host's game also sends its whole world as save data (every save handler's
+-- createGameSlotSavedata, through ext.worldx, ~0.7 MB in 60 KB pieces): what a save of it would hold
+-- now (story, gimmicks, items taken, enemies, events seen, the chapter and the spot it's at), but not
+-- the inventories (the guest's own things are put in their hands, the box is the host's through the box
+-- sync), achievements or the flashlight settings. A guest with a save of their own loads it ("Continue")
+-- while every handler's restoreGameSlotSavedata gets the host's data instead: their game comes up in
+-- the host's world, at the host's spot, as if it were their save (their save file is only read). A
+-- guest without a save gets the new game in the host's chapter. The host sends its world again each
+-- time it saves; a load in the co-op playthrough (a game over, "Restart") loads the host's last world
+-- the same way.
 -- (a function of its own: the main chunk is at Lua's limit of 200 locals)
 ;(function()
 local T_TITLE = sdk.typeof("app.TitleFlowController")
@@ -3475,17 +3906,127 @@ local T_EQUIP = sdk.find_type_definition("app.InventoryEquipSlot")
 local T_SHORTCUT = sdk.find_type_definition("app.InventoryShortcutSlot")
 local EQUIP = { "Primary", "Secondary" }
 local SHORTCUTS = { "Equip_Up", "Equip_Up2", "Equip_Down", "Equip_Down2", "Equip_Left", "Equip_Left2", "Equip_Right", "Equip_Right2" }
-local PLAY_START, PLAY_KIT = 1, 2
+local PLAY_START, PLAY_KIT, PLAY_WORLD = 1, 2, 3
+-- not taken from the host's world: inventories (the guest's own things), achievements, flashlight settings
+local WORLD_KEEP = { InventoryManager = true, AchievementManager = true, LayeredParamManager = true }
+local WORLD_CHUNK = 60000
 local CAT_SYSTEM = 1 -- app.SaveSlotCategory.System
+local title_controller -- below
 local fresh = {
     active = false,     -- in a co-op playthrough: our game slots don't save
     phase = nil,        -- "asked" (the host's chapter), "starting", "arrived", "await_kit", "playing"
     host = nil, chapter = nil, t = 0, title_t = 0, title = false, saved_t = 0,
     fade_since = nil, fade_t = 0,
+    world = nil,        -- the host's world, decoded: save handler key -> save data object
+    world_on = false,   -- the save handlers' restores get the host's world
+    world_tag = 0, out = nil, parts = nil, subs = 0, via = nil,
 }
 ext.fresh = fresh
 
-local function title_controller()
+-- the game's save handlers: key -> handler object
+local function save_handlers()
+    local ssm = sdk.get_managed_singleton("app.SaveServiceManager")
+    local d = ssm and ssm:get_field("_GameSlotSaveHandlers")
+    local n = d and d:get_field("_count") or 0
+    local out = {}
+    for i, e in ipairs(elements(d and d:get_field("_entries")) or {}) do
+        if i > n then break end
+        if (e:get_field("hashCode") or -1) >= 0 then out[e:get_field("key")] = e:get_field("value"):get_field("_Handler") end
+    end
+    return out
+end
+
+-- our world as the save handlers would save it now, encoded (inside the game's GUI update)
+local function world_blob()
+    local roots = {}
+    for key, h in pairs(save_handlers()) do
+        if not WORLD_KEEP[key] then
+            local args = sdk.create_instance("app.GameSlotSaveEventArgs")
+            local m = h:get_type_definition():get_method("app.IGameSlotSaveHandler.createGameSlotSavedata(app.GameSlotSaveEventArgs)")
+            if args and m then
+                args:call("set_KeyName", key)
+                local ok, data = pcall(m.call, m, h, args)
+                if ok and data then roots[key] = data end
+            end
+        end
+    end
+    return json.dump_string(ext.worldx.encode(roots))
+end
+
+-- send our world to `to` (a few pieces a frame; a piece Steam can't take yet is tried again)
+local function send_world(to)
+    ext.later(function()
+        local ok, blob = pcall(world_blob)
+        if not ok then say("couldn't pack the world: %s", tostring(blob)) return end
+        fresh.world_tag = (fresh.world_tag % 60000) + 1
+        local chunks = {}
+        for i = 1, #blob, WORLD_CHUNK do chunks[#chunks + 1] = blob:sub(i, i + WORLD_CHUNK - 1) end
+        fresh.out = { to = to, tag = fresh.world_tag, chunks = chunks, next = 1, size = #blob }
+    end)
+end
+ext.fresh_send_world = send_world
+
+local function pump_world()
+    local o = fresh.out
+    if o == nil or net == nil then return end
+    for _ = 1, 2 do
+        local c = o.chunks[o.next]
+        if c == nil then
+            fresh.out = nil
+            say("sent your world to your partner (%d KB)", o.size // 1024)
+            return
+        end
+        local n = net.send(string.pack("<BI2I2I2s4", MSG.WORLD, o.tag, o.next, #o.chunks, c), true, CH_CTRL, o.to)
+        if (n or 0) <= 0 then return end -- Steam's queue is full: this piece again next frame
+        o.next = o.next + 1
+    end
+end
+
+-- does this game have a save to load ("Continue")?
+local function has_own_save()
+    local ssm = sdk.get_managed_singleton("app.SaveServiceManager")
+    local d = ssm and ssm:get_field("_SaveSlotInfoDict")
+    local n = d and d:get_field("_count") or 0
+    for i, e in ipairs(elements(d and d:get_field("_entries")) or {}) do
+        if i > n then break end
+        local k = (e:get_field("hashCode") or -1) >= 0 and e:get_field("key")
+        if k and (k:get_field("_SlotId") or -1) >= 0 then return true end
+    end
+    return false
+end
+
+-- every save handler's restore takes the host's world instead while fresh.world_on (hooked once the
+-- handlers exist)
+local function hook_restores()
+    if fresh.restores_hooked then return end
+    local hs = save_handlers()
+    if next(hs) == nil then return end
+    fresh.restores_hooked = true
+    for key, h in pairs(hs) do
+        local m = h:get_type_definition():get_method("app.IGameSlotSaveHandler.restoreGameSlotSavedata(app.SavedataObjectBase, app.GameSlotRestoreEventArgs)")
+        if m and not WORLD_KEEP[key] then
+            sdk.hook(m, function(args)
+                local sub = fresh.world_on and fresh.world and fresh.world[key]
+                if sub then
+                    args[3] = sdk.to_ptr(sub)
+                    fresh.subs = fresh.subs + 1
+                end
+            end, nil)
+        end
+    end
+end
+
+-- at the main menu: "Continue" with the host's world in place of ours (GUI update)
+local function start_world_load()
+    local tfc = title_controller()
+    if tfc == nil or fresh.world == nil then return false end
+    hook_restores()
+    fresh.world_on, fresh.subs, fresh.via, fresh.load_go = true, 0, "world", me.go_addr
+    tfc:call("onContinue")
+    return true
+end
+
+title_controller = function()
     local sm = sdk.get_native_singleton("via.SceneManager")
     local scene = sm and sdk.call_native_func(sm, sdk.find_type_definition("via.SceneManager"), "get_CurrentScene")
     local list = scene and scene:call("findComponents(System.Type)", T_TITLE)
@@ -3660,12 +4201,20 @@ do
             end, post)
         end
     end
-    -- a load (game over, "Restart", "Load") brings the guest's own save back: the playthrough ends there
+    -- a load in the playthrough (game over, "Restart", "Load"): the host's last world comes up again
+    -- (without one, the guest's own save loads and the playthrough ends there)
     for _, m in ipairs(T_SSM:get_methods()) do
         if m:get_name() == "requestLoad" then
             sdk.hook(m, function()
-                if fresh.active then
-                    pcall(store_kit, "loading your own save")
+                if not fresh.active or fresh.world_on then return end
+                pcall(store_kit, "loading")
+                if fresh.world then
+                    hook_restores()
+                    fresh.world_on, fresh.subs, fresh.phase, fresh.t, fresh.load_go = true, 0, "loading_world", now(), me.go_addr
+                    say("loading the host's world again")
+                    local g = guest_session()
+                    if g then send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_WORLD), g.owner) end
+                else
                     fresh.active, fresh.phase = false, nil
                     say("co-op playthrough over: your own last save loads (join from the main menu again)")
                 end
@@ -3707,11 +4256,15 @@ ext.fresh_ctrl = function(from, kind, data)
         if not ((st and st.is_host) or _G.re9coop_test_owner) or me.go == nil then return end -- (dev bridge: test_owner)
         local _, what = string.unpack("<BB", data)
         if what == PLAY_START then
+            if ext.on_peer_left then ext.on_peer_left(from) end -- a new game there: our whole world again
             local dm = sdk.get_managed_singleton("app.GameDifficultyManager")
             local ok, d = pcall(function() return dm:call("get_DifficultyID"):call("ToString") end)
             local chapter = me.chapter:match("^(Chap%d+_%d%d)") or me.chapter
             send_ctrl(string.pack("<Bs1s1", MSG.PLAY, chapter, ok and d or ""), from)
             say("your partner starts a co-op playthrough in %s", chapter)
+            send_world(from)
+        elseif what == PLAY_WORLD then
+            send_world(from)
         elseif what == PLAY_KIT then
             local ok, kit = pcall(read_kit)
             if ok then send_ctrl(string.pack("<Bs4", MSG.KIT, json.dump_string(kit)), from) end
@@ -3720,7 +4273,13 @@ ext.fresh_ctrl = function(from, kind, data)
         local g = guest_session()
         if fresh.phase ~= "asked" or not (g and from == g.owner) then return end
         local _, chapter, difficulty = string.unpack("<Bs1s1", data)
-        fresh.phase, fresh.t, fresh.host, fresh.chapter = "starting", now(), from, chapter
+        fresh.host, fresh.chapter, fresh.play = from, chapter, { chapter, difficulty }
+        if has_own_save() then
+            fresh.phase, fresh.t = "await_world", now()
+            say("getting the host's world...")
+            return
+        end
+        fresh.phase, fresh.t, fresh.via = "starting", now(), "newgame"
         fresh.active = true
         ext.later(function()
             if start_new_game(chapter, difficulty) then
@@ -3728,6 +4287,39 @@ ext.fresh_ctrl = function(from, kind, data)
                 say("starting a co-op playthrough in %s (your own saves aren't touched)", chapter)
             else
                 fresh.active, fresh.phase = false, nil
+            end
+        end)
+    elseif kind == MSG.WORLD then
+        local g = guest_session()
+        if not (g and from == g.owner) then return end
+        local _, tag, idx, total, chunk = string.unpack("<BI2I2I2s4", data)
+        local pt = fresh.parts
+        if pt == nil or pt.tag ~= tag then
+            pt = { tag = tag, total = total, got = 0, chunks = {} }
+            fresh.parts = pt
+        end
+        if pt.chunks[idx] == nil then
+            pt.chunks[idx], pt.got = chunk, pt.got + 1
+        end
+        if pt.got < pt.total then return end
+        fresh.parts = nil
+        local blob = table.concat(pt.chunks)
+        ext.later(function()
+            local okj, enc = pcall(json.load_string, blob)
+            if not okj or type(enc) ~= "table" then say("the host's world didn't arrive whole") return end
+            local okd, roots, missing, objs = pcall(ext.worldx.decode, enc)
+            if not okd then say("couldn't unpack the host's world: %s", tostring(roots)) return end
+            for _, o in ipairs(fresh.world_objs or {}) do pcall(o.release, o) end
+            fresh.world, fresh.world_objs = roots, objs
+            if #missing > 0 then say("the host's world: %d objects this game doesn't know", #missing) end
+            if fresh.phase == "await_world" and me.go == nil then
+                fresh.active, fresh.phase, fresh.t = true, "loading_world", now()
+                if start_world_load() then
+                    ext.fade_arm()
+                    say("loading the host's world (%d KB; your own saves aren't touched)", #blob // 1024)
+                else
+                    fresh.active, fresh.phase = false, nil
+                end
             end
         end)
     elseif kind == MSG.KIT then
@@ -3764,6 +4356,27 @@ local function skip_cutscene()
 end
 
 ext.fresh_late = function(t_now)
+    pump_world()
+    -- the loaded player (not the one still there when the load began)
+    if fresh.world_on and me.go ~= nil and me.chapter ~= "" and fresh.phase == "loading_world"
+        and (me.go_addr ~= fresh.load_go or t_now - fresh.t > 25) then
+        fresh.world_on = false
+        fresh.phase, fresh.t = "arrived", t_now
+        say("in the host's world (%d parts of it loaded)", fresh.subs)
+    end
+    if fresh.phase == "await_world" and t_now - fresh.t > 40 and fresh.play then
+        -- no world came: the new game in the host's chapter instead
+        local play = fresh.play
+        fresh.phase, fresh.t, fresh.via, fresh.active = "starting", t_now, "newgame", true
+        ext.later(function()
+            if start_new_game(play[1], play[2]) then ext.fade_arm() else fresh.active, fresh.phase = false, nil end
+        end)
+        say("the host's world didn't come: starting in its chapter instead")
+    end
+    if fresh.phase == "loading_world" and me.go == nil and t_now - fresh.t > 120 then
+        fresh.active, fresh.phase, fresh.world_on = false, nil, false
+        say("the host's world didn't load: trying again")
+    end
     local f = sdk.get_managed_singleton("app.FadeManager")
     local calm = me.go ~= nil and not in_cutscene() and not (f and f:call("isAnyFadeOut"))
     if calm then fresh.calm_since = fresh.calm_since or t_now else fresh.calm_since = nil end
@@ -3771,7 +4384,7 @@ ext.fresh_late = function(t_now)
     -- (3 s into it: a skip right as it starts is taken but the cutscene plays on)
     local cut_now = me.go ~= nil and in_cutscene()
     if cut_now then fresh.cut_since = fresh.cut_since or t_now else fresh.cut_since = nil end
-    if fresh.active and (fresh.phase == "arrived" or fresh.phase == "starting") and cut_now
+    if fresh.active and fresh.via == "newgame" and (fresh.phase == "arrived" or fresh.phase == "starting") and cut_now
         and t_now - fresh.cut_since >= 3 and t_now - fresh.t < 180 and t_now >= (fresh.skip_t or 0) then
         fresh.skip_t = t_now + 1
         ext.later(skip_cutscene)
@@ -3781,7 +4394,9 @@ ext.fresh_late = function(t_now)
         fresh.title = me.go == nil and title_controller() ~= nil
     end
     -- back at the main menu after playing it (not while the new game is still on its way)
-    if fresh.active and fresh.title and fresh.phase ~= "starting" then end_playthrough("back at the main menu") end
+    if fresh.active and fresh.title and fresh.phase ~= "starting" and fresh.phase ~= "loading_world" then
+        end_playthrough("back at the main menu")
+    end
     if fresh.phase == "starting" and me.go == nil and t_now - fresh.t > 90 then
         fresh.active, fresh.phase = false, nil
         say("the co-op playthrough didn't start: trying again")
@@ -3793,7 +4408,7 @@ ext.fresh_late = function(t_now)
             fresh.left_t = t_now
             store_kit("you left the session")
         end
-        if fresh.phase == "asked" then fresh.phase = nil end
+        if fresh.phase == "asked" or fresh.phase == "await_world" then fresh.phase = nil end
         return
     end
     fresh.left_t = nil
@@ -3831,7 +4446,13 @@ end
 
 ext.fresh_draw = function()
     local msg
-    if fresh.phase == "asked" or fresh.phase == "starting" then
+    if fresh.phase == "await_world" then
+        local pt = fresh.parts
+        msg = pt and string.format("Getting the host's world... %d%%", pt.got * 100 // math.max(1, pt.total))
+            or "Getting the host's world..."
+    elseif fresh.phase == "loading_world" then
+        msg = "Loading the host's world..."
+    elseif fresh.phase == "asked" or fresh.phase == "starting" then
         msg = "Starting the co-op playthrough in the host's chapter..."
     elseif ext.fresh_hold() and me.go then
         msg = "You're in the host's lobby with your own save: go to the main menu (Esc > Quit), the co-op playthrough starts there. Your own save isn't touched."
@@ -3841,6 +4462,7 @@ end
 
 -- dev
 fresh.read_kit, fresh.apply_kit, fresh.start_new_game, fresh.load_kit = read_kit, apply_kit, start_new_game, load_kit
+fresh.world_blob, fresh.start_world_load, fresh.hook_restores = world_blob, start_world_load, hook_restores
 end)()
 
 -------------------------------------------------------------------------------------------------
@@ -3949,6 +4571,9 @@ saves.late = function(t_now)
                 send_ctrl(string.pack("<Bs1", MSG.SAVE, me.chapter))
                 saves.stats.sent = saves.stats.sent + 1
                 say("saved: your partner's game saves too")
+                -- a partner in a co-op playthrough gets our world as saved (what a load of theirs brings back)
+                local p = partner_to_follow and partner_to_follow()
+                if p and p.id ~= LOOPBACK_ID and ext.fresh_send_world then ext.fresh_send_world(p.id) end
             end
         end
     end
