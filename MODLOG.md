@@ -563,6 +563,18 @@ down, the hint panel), recordings played back as the partner on a fresh game, an
 - In Chap3_02 the side of the sun / moon / star door facing -z (z < 23.5) isn't loaded at the start:
   warping there is a fall; its window is seen from z 25 (its "Item" child at y 5.93).
 
+- Release zip with its dependencies (2026-10-17): the mod needs only REFramework. re9coop_net.dll
+  imports KERNEL32 alone (static CRT, /MT) and finds the game's steam_api64.dll at run time;
+  REFramework's dinput8.dll imports only Windows DLLs (d3d11 / d3d12 / D3DCompiler_47 and the VR
+  loaders openxr_loader / openvr_api are delay-loaded, the VR ones only in VR). The zip now carries
+  dinput8.dll of nightly 01432 (d052e8fd, the build every test ran on; SHA-256 70a2a3c2...05ac,
+  identical to the installed one) at its root, plus licenses/REFramework_LICENSE.txt (MIT) and
+  licenses/REFramework_THIRD_PARTY_NOTICES.txt: REFramework's own src/LicenseStrings.hpp at that
+  commit (glm, imgui, cimgui, MinHook, spdlog, Roboto / Noto CJK, OpenVR, sol2, json, Lua, AsmJit,
+  bddisasm, OpenXR, ImGuizmo, DirectXTK) and the license files of imnodes, DirectXTK12, safetyhook,
+  kananlib and FreeType (FTL) at the revisions its cmake.toml pins. tools/package.py takes the dll
+  from _deps/REFramework-nightly/ (downloads the pinned nightly zip if missing) and checks the hash.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

@@ -61,6 +61,17 @@ from it is used.
 
 **Not shared:** what you carry (each keeps their own inventory, saved in their own save).
 
+### Install (both players)
+Unpack the archive into the game folder (where `re9.exe` is) and let the `reframework` folder merge.
+Everything the mod needs is in it:
+- `dinput8.dll` — REFramework, nightly build 01432 (commit d052e8f), unmodified: the build the mod is
+  tested with. If you already use REFramework, this replaces your `dinput8.dll`.
+- `reframework/autorun/re9coop_main.lua` and `reframework/plugins/re9coop_net.dll` — the mod. The
+  plugin uses the game's own `steam_api64.dll`; nothing else to install (no runtimes, no Steamworks).
+- `licenses/` — REFramework's license and the licenses of the libraries inside it.
+
+Both players need the same mod version. Steam has to be running (the game needs it anyway).
+
 ---
 
 ## Русский
@@ -132,11 +143,15 @@ from it is used.
    тот, с которым он сохранился.
 
 ### Установка (оба игрока)
-1. **REFramework**: скачайте `REFramework.zip` (текущая ночная сборка) с
-   https://github.com/praydog/REFramework-nightly/releases и положите **только** `dinput8.dll` в папку
-   игры (где `re9.exe`).
-2. Распакуйте архив мода в папку игры (папка `reframework` сольётся с существующей).
-3. Версия мода у обоих должна совпадать.
+1. Распакуйте архив в папку игры (где `re9.exe`), папка `reframework` сольётся с существующей. В архиве
+   всё, что нужно моду:
+   - `dinput8.dll` — REFramework, ночная сборка 01432 (коммит d052e8f), без изменений: на ней мод
+     проверен. Если REFramework у вас уже стоит, этот файл заменит ваш `dinput8.dll`.
+   - `reframework/autorun/re9coop_main.lua` и `reframework/plugins/re9coop_net.dll` — сам мод. Плагин
+     пользуется `steam_api64.dll` самой игры; ничего больше ставить не нужно (ни библиотек Visual C++,
+     ни Steamworks).
+   - `licenses/` — лицензия REFramework и лицензии библиотек внутри неё.
+2. Версия мода у обоих должна совпадать. Steam должен быть запущен (игре он нужен и так).
 
 ### Как подключиться к лобби
 Меню мода: в игре нажмите **Insert** → *Script Generated UI* → **RE9 Co-op (online)**.
@@ -167,7 +182,8 @@ from it is used.
 
 ### Удаление
 Удалите `reframework/autorun/re9coop_main.lua`, `reframework/plugins/re9coop_net.dll` и
-`reframework/data/re9coop_config.json`.
+`reframework/data/re9coop_config.json`. `dinput8.dll` (REFramework) удалите, если других модов на
+REFramework у вас нет.
 
 ---
 
@@ -272,6 +288,7 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   the game instead.
 
 ## Credits
-- REFramework by praydog and contributors (Lua scripting and plugin API).
+- REFramework by praydog and contributors (Lua scripting and plugin API), MIT License; shipped as
+  `dinput8.dll` with its license and third-party notices in `licenses/`.
 - File path list for RE9 paks: Ekey's REE.PAK.Tool project lists.
 - Built with Claude (Anthropic) using the universal-modder toolkit.
