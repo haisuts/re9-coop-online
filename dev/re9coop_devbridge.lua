@@ -161,6 +161,8 @@ end)
 -- the player's save files, and no Steam achievement is unlocked. "2" skips only the system slot (to
 -- test the mod's own blocking of game-slot saves: back the save folder up first).
 local SAVE_FLAG = "re9coop_bridge/block_saves.flag"
+-- a test game never hosts or joins the player's last co-op session by itself
+_G.re9coop_test_no_rejoin = true
 local block_t, block_v, block_mode = -1, false, ""
 local function saves_blocked()
     local t = os.clock()

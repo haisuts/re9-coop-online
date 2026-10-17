@@ -625,6 +625,30 @@ box; the host saw the friend's Leon bald.
   game's own fades (it fired once on a normal Continue load before it was limited).
 - PROTO 9 (new messages PLAY_REQ 33, PLAY 34, KIT 35).
 
+## v0.10.1 (2026-10-17) — the guest's chapter froze on joining
+
+The first real co-op playthrough (the friend's log and the host's): the guest's new game started in
+Chap3_02, the host sent its 86 story steps and 684 gimmick states on arrival, the guest's screen
+stayed black (the mod's watchdog faded it in after 8 s) and the guest could neither move nor look
+around.
+- Reproduced on one PC with the host's real Chap3_02 (AUTO 02, 86 moved flows): a new game in
+  Chap3_02 alone plays the chapter's opening cutscene after ~12 s of black, then gives control; with
+  the 86 steps applied right on arrival the opening never starts, the screen stays black (40 s+),
+  and faded in there is no moving, no camera; a chapter jump doesn't recover it (the flows carry
+  over). The same 86 steps applied after the opening: control, no black screen.
+- Fixed: the partner's story steps (whole-chapter catch-up and live ones) and gimmick messages wait
+  while our game is setting up (no player, a cutscene, a fade); they're applied once it has been free
+  for 3 s ("caught up with N story steps"). The guest's kit is applied then too. The co-op
+  playthrough skips the chapter's opening cutscene: TimelineEventMediator.skip right as a cutscene
+  starts is taken (returns true) but it plays on; 3-4 s in it ends it (what the pause menu does,
+  with GuiPauseMenuController.Unit as the caller; the mediator as the caller works the same). The
+  black-screen watchdog waits 20 s (8 s cut into the normal opening load).
+- End to end on one PC: host reply -> player 12 s -> opening skipped 6 s later -> 86 steps and the
+  kit 4 s after that -> moving 2.5 m and turning the camera.
+- A test game started with the user's last session less than 10 minutes old hosted a (friends-only)
+  lobby by itself (auto-rejoin); left at once, nobody had joined. The dev bridge now sets
+  _G.re9coop_test_no_rejoin.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

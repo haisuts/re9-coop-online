@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.10.0
+# RE9 Co-op (online) — v0.10.1
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -59,8 +59,10 @@ from it is used.
   saves are never touched: while they play with you their game saves nothing into its save slots.
   What the guest carries (Leon's and Grace's items, ammo, money, pouches, equipped weapons) is kept by
   the mod for this host and comes back the next time they join you; the first time they get a copy of
-  what you carry. A guest who joins while playing their own save is asked to go to the main menu first
-  (nothing is shared until then).
+  what you carry. The chapter's opening cutscene is skipped for them, and the host's story is applied
+  once their game has started the chapter (applied earlier, it froze the chapter: no moving, no
+  looking around). A guest who joins while playing their own save is asked to go to the main menu
+  first (nothing is shared until then).
 - **Saving together**: the host saves as usual (autosaves, typewriter); each time, the mod also keeps
   what the guest carries. To go on later: the host loads their save and hosts, the guest joins from
   the main menu.
@@ -143,12 +145,14 @@ Both players need the same mod version. Steam has to be running (the game needs 
   Что гость несёт (вещи Леона и Грейс, патроны, деньги, сумки, экипировка), мод хранит для этого хоста
   в файле `reframework/data/re9coop_coop_<SteamID хоста>.json`: он обновляется при каждом сохранении
   хоста, раз в 2 минуты и при выходе из лобби, и при следующем входе к этому хосту вещи возвращаются.
-  В самый первый раз гость получает копию снаряжения хоста. Если гость вошёл в лобби из своей игры,
+  В самый первый раз гость получает копию снаряжения хоста. Начальная катсцена главы у гостя
+  пропускается сама, а сюжет хоста применяется, когда его игра уже запустила главу (если применить
+  раньше, глава зависала: ни ходить, ни крутить камеру). Если гость вошёл в лобби из своей игры,
   мод попросит выйти в главное меню (до этого миры не смешиваются).
 - **Совместное сохранение:** хост сохраняется как обычно (автосейвы, печатная машинка); каждый раз мод
   заодно сохраняет вещи гостя.
 - **Чёрный экран после перехода:** если после перехода в главу, начала совместного прохождения или
-  пропуска катсцены напарником экран остаётся чёрным дольше 8 секунд, мод снимает затемнение сам.
+  пропуска катсцены напарником экран остаётся чёрным дольше 20 секунд, мод снимает затемнение сам.
 
 ### Как продолжить прохождение в другой день
 1. Хост запускает игру, выбирает **«Продолжить»** и создаёт сессию.

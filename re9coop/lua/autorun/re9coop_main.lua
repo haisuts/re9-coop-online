@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.10.0"
+local VERSION = "0.10.1"
 local PROTO = 9
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -2369,6 +2369,7 @@ end
 -- the partner's gimmick messages, applied inside the game's GUI update
 gim.gui_tick = function()
     if #gim.queue == 0 or not world_shared() then return end
+    if ext.settled and not ext.settled() then return end -- (see the story's wait)
     local queue = gim.queue
     gim.queue = {}
     for i, m in ipairs(queue) do
@@ -2443,6 +2444,7 @@ local T_MEDIATOR = "app.TimelineEventMediator"
 story = {
     expect = {},          -- flow hash -> value we asked for (its echo isn't sent back)
     out = {},
+    wait = {},            -- the partner's steps that came while our game was still setting up
     full_done_for = nil,
     follow = { target = nil, at = 0, tries = 0 },
     stats = { sent = 0, applied = 0, jumps = 0 },
@@ -2548,13 +2550,22 @@ go_to_partner_chapter = function()
     return "going to " .. p.chapter
 end
 
+-- The partner's steps wait while our game is still setting a scene up (no player yet, a cutscene,
+-- a fade): the host's whole-chapter catch-up applied while a co-op playthrough's chapter was still
+-- loading moved its flows past the chapter's opening event, which then never ran: a black screen,
+-- and no moving or looking around. Applied once we've been free for 3 s, they leave it alone.
 story_ctrl = function(from, kind, data)
     if not world_shared() or not cfg.story_sync then return end
-    if kind == MSG_STORY or kind == MSG.STORY_FWD then pcall(apply_story, data) end
+    if kind ~= MSG_STORY and kind ~= MSG.STORY_FWD then return end
+    if ext.settled and not ext.settled() then
+        if #story.wait < 4096 then story.wait[#story.wait + 1] = data end
+        return
+    end
+    pcall(apply_story, data)
 end
 
 story_reset = function()
-    story.expect, story.out, story.full_done_for = {}, {}, nil
+    story.expect, story.out, story.full_done_for, story.wait = {}, {}, nil, {}
 end
 
 story_late = function(t_now)
@@ -2574,6 +2585,14 @@ story_late = function(t_now)
         end
         say("sent %d story steps to your partner", n)
         story.stats.sent = story.stats.sent + n
+    end
+    if #story.wait > 0 and (ext.settled == nil or ext.settled()) then
+        local wait = story.wait
+        story.wait = {}
+        ext.later(function()
+            for _, d in ipairs(wait) do pcall(apply_story, d) end
+        end)
+        say("caught up with %d story steps from your partner", #wait)
     end
     if #story.out > 0 then
         local out = story.out
@@ -3097,7 +3116,7 @@ end
 cut.current_event = current_event
 
 sdk.hook(sdk.find_type_definition(T_MEDIATOR):get_method("skip(System.Object)"), function()
-    if cut.replaying or not cfg.skip_together or not world_shared() then return end
+    if cut.replaying or ext.cut_quiet or not cfg.skip_together or not world_shared() then return end
     local id = current_event(mediator())
     if id then
         send_ctrl(string.pack("<Bs1i4", MSG.CUTSCENE, me.chapter, id))
@@ -3672,7 +3691,7 @@ local function fade_watch(t_now)
         return
     end
     fresh.fade_since = fresh.fade_since or t_now
-    if t_now - fresh.fade_since > 8 then
+    if t_now - fresh.fade_since > 20 then
         fresh.fade_since = nil
         ext.later(function()
             for t = 0, 8 do pcall(f.call, f, "requestFadeIn", t, 0.5, nil, nil) end
@@ -3725,7 +3744,38 @@ ext.fresh_ctrl = function(from, kind, data)
     end
 end
 
+-- our game is free: a player, no cutscene, no fade, for 3 s
+ext.settled = function()
+    return fresh.calm_since ~= nil and now() - fresh.calm_since >= 3
+end
+
+local function skip_cutscene()
+    local m = sdk.get_managed_singleton("app.TimelineEventMediator")
+    if m == nil or not m:call("get_IsPlayingCutScene") then return end
+    fresh.skip_tries = (fresh.skip_tries or 0) + 1
+    if not m:call("get_IsSkippable") then return end
+    ext.cut_quiet = true
+    local ok, done = pcall(m.call, m, "skip(System.Object)", m) -- the caller can't be null
+    ext.cut_quiet = false
+    if ok and done then
+        fresh.skips = (fresh.skips or 0) + 1
+        say("skipped the chapter's opening (the host has seen it)")
+    end
+end
+
 ext.fresh_late = function(t_now)
+    local f = sdk.get_managed_singleton("app.FadeManager")
+    local calm = me.go ~= nil and not in_cutscene() and not (f and f:call("isAnyFadeOut"))
+    if calm then fresh.calm_since = fresh.calm_since or t_now else fresh.calm_since = nil end
+    -- a co-op playthrough starts in the middle of the host's chapter: its opening cutscene is skipped
+    -- (3 s into it: a skip right as it starts is taken but the cutscene plays on)
+    local cut_now = me.go ~= nil and in_cutscene()
+    if cut_now then fresh.cut_since = fresh.cut_since or t_now else fresh.cut_since = nil end
+    if fresh.active and (fresh.phase == "arrived" or fresh.phase == "starting") and cut_now
+        and t_now - fresh.cut_since >= 3 and t_now - fresh.t < 180 and t_now >= (fresh.skip_t or 0) then
+        fresh.skip_t = t_now + 1
+        ext.later(skip_cutscene)
+    end
     if t_now >= fresh.title_t then
         fresh.title_t = t_now + 1
         fresh.title = me.go == nil and title_controller() ~= nil
@@ -3758,7 +3808,7 @@ ext.fresh_late = function(t_now)
     if not fresh.active then return end
     if fresh.phase == "starting" and me.chapter ~= "" then
         fresh.phase, fresh.t = "arrived", t_now
-    elseif fresh.phase == "arrived" and t_now - fresh.t > 3 and not in_cutscene() then
+    elseif fresh.phase == "arrived" and ext.settled() then
         local kit = load_kit(fresh.host)
         if kit then
             fresh.phase = "playing"
@@ -4249,7 +4299,8 @@ local function tick_session(t_now)
             session.rj = { till = t_now + 180, next = t_now + 2, tries = 0 }
             say("the co-op session dropped: reconnecting...")
         end
-    elseif session.rj == nil and not session.started and cfg.auto_rejoin and cfg.last_host ~= "" and me.go then
+    elseif session.rj == nil and not session.started and cfg.auto_rejoin and cfg.last_host ~= "" and me.go
+        and not _G.re9coop_test_no_rejoin then -- (dev bridge: tests never pick an old session up)
         session.started = true
         local age = os.time() - cfg.last_t
         if age < (cfg.last_was_host and 600 or 1800) then
