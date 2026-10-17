@@ -1,13 +1,13 @@
-# RE9 Co-op (online) — v0.9.2
+# RE9 Co-op (online) — v0.10.0
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
 from it is used.
 
 **What it does:**
-- **Your partner in your world**: a fully posed character in their own costume — every animation they
-  play, the gun in their hands, a name tag with the ping, their muzzle flash, gun sounds and
-  flashlight.
+- **Your partner in your world**: a fully posed character in their own costume and hair — every
+  animation they play, the gun in their hands, a name tag with the ping, their muzzle flash, gun
+  sounds and flashlight.
 - **Shared enemies**: each enemy is run by the player it's closest to, so enemies hunt, grab and hurt
   both of you. The other player sees the same enemy pose for pose; their hits on it count, and an enemy
   killed by one player is dead in the other's game too.
@@ -53,13 +53,20 @@ from it is used.
   player picks up their own".
 - **One item box for both**: what one player puts in the item box, the other finds in theirs and can
   take out (guns keep their loaded ammo).
-- **Saving together**: whenever the host's game saves (autosave or typewriter), the guest's game makes
-  an autosave too. To go on later: both load their latest save, the host hosts, the guest joins — the
-  host's progress (story, locks, puzzles, box) is sent on joining and the guest follows the host's
-  chapter.
+- **The guest plays in the host's story (a co-op playthrough)**: the guest joins from the main menu
+  (not from their own save). Their game starts a new game right in the host's chapter, on the host's
+  difficulty, and takes the host's world (story, locks, puzzles, item box, recipes). The guest's own
+  saves are never touched: while they play with you their game saves nothing into its save slots.
+  What the guest carries (Leon's and Grace's items, ammo, money, pouches, equipped weapons) is kept by
+  the mod for this host and comes back the next time they join you; the first time they get a copy of
+  what you carry. A guest who joins while playing their own save is asked to go to the main menu first
+  (nothing is shared until then).
+- **Saving together**: the host saves as usual (autosaves, typewriter); each time, the mod also keeps
+  what the guest carries. To go on later: the host loads their save and hosts, the guest joins from
+  the main menu.
 - **Teleport to partner**, partner health in the name tag, public lobbies and a "Copy lobby ID" button.
 
-**Not shared:** what you carry (each keeps their own inventory, saved in their own save).
+**Not shared:** what you carry (each keeps their own inventory; the guest's is kept by the mod).
 
 ### Install (both players)
 Unpack the archive into the game folder (where `re9.exe` is) and let the `reframework` folder merge.
@@ -77,8 +84,8 @@ Both players need the same mod version. Steam has to be running (the game needs 
 ## Русский
 
 **Что синхронизируется:**
-- **Напарник в вашем мире:** персонаж в своём костюме со всеми анимациями, оружием, вспышками
-  выстрелов, звуками оружия, фонариком; над головой ник, здоровье в % и пинг.
+- **Напарник в вашем мире:** персонаж в своём костюме и с причёской, со всеми анимациями, оружием,
+  вспышками выстрелов, звуками оружия, фонариком; над головой ник, здоровье в % и пинг.
 - **Враги:** каждым врагом управляет тот, к кому он ближе, — враги нападают на обоих; попадания
   обоих засчитываются; второй игрок видит того же врага движение в движение.
 - **Двери:** толкнули дверь — она открывается и у напарника.
@@ -129,18 +136,25 @@ Both players need the same mod version. Steam has to be running (the game needs 
   забрать (и наоборот). Оружие переносится вместе с заряженными патронами. Пока ящик у вас открыт,
   изменения от напарника ждут, пока вы его закроете. Передаётся только то, что игрок сам сделал в
   ящике (стартовые наборы, которые игра кладёт в ящики в начале глав, у каждого свои — без дублей).
-- **Совместное сохранение:** когда сохраняется игра хоста (автосейв или печатная машинка), игра гостя
-  тут же делает автосейв (в слот автосохранения — ручные слоты гостя не трогаются). Если сохранить
-  сейчас нельзя (катсцена, загрузка, бой, где игра запрещает сохранение), гость сохранится, как только
-  станет можно.
+- **Гость играет в сюжете хоста (совместное прохождение):** гость входит в лобби из **главного
+  меню**, а не из своего сохранения. Его игра сама начинает новую игру сразу в главе хоста, на
+  сложности хоста, и получает мир хоста (сюжет, замки, загадки, ящик, рецепты). Свои сохранения гостя
+  не трогаются никогда: пока он играет у вас, его игра ничего не записывает в слоты сохранений.
+  Что гость несёт (вещи Леона и Грейс, патроны, деньги, сумки, экипировка), мод хранит для этого хоста
+  в файле `reframework/data/re9coop_coop_<SteamID хоста>.json`: он обновляется при каждом сохранении
+  хоста, раз в 2 минуты и при выходе из лобби, и при следующем входе к этому хосту вещи возвращаются.
+  В самый первый раз гость получает копию снаряжения хоста. Если гость вошёл в лобби из своей игры,
+  мод попросит выйти в главное меню (до этого миры не смешиваются).
+- **Совместное сохранение:** хост сохраняется как обычно (автосейвы, печатная машинка); каждый раз мод
+  заодно сохраняет вещи гостя.
+- **Чёрный экран после перехода:** если после перехода в главу, начала совместного прохождения или
+  пропуска катсцены напарником экран остаётся чёрным дольше 8 секунд, мод снимает затемнение сам.
 
 ### Как продолжить прохождение в другой день
-1. Оба запускают игру и выбирают **«Продолжить»** (последнее сохранение — у гостя это совместный
-   автосейв).
-2. Хост создаёт сессию, гость подключается (см. ниже).
-3. При подключении хост сам отправляет гостю прогресс главы (сюжет, замки, загадки) и содержимое
-   ящика; если гость в другой главе — через 5 секунд он перейдёт к хосту. Инвентарь у каждого свой —
-   тот, с которым он сохранился.
+1. Хост запускает игру, выбирает **«Продолжить»** и создаёт сессию.
+2. Гость запускает игру, остаётся в **главном меню** и подключается (см. ниже).
+3. Игра гостя сама начинает совместное прохождение в главе хоста; прогресс главы (сюжет, замки,
+   загадки) и ящик приходят от хоста, вещи гостя — из его файла у мода.
 
 ### Установка (оба игрока)
 1. Распакуйте архив в папку игры (где `re9.exe`), папка `reframework` сольётся с существующей. В архиве
@@ -165,12 +179,15 @@ Both players need the same mod version. Steam has to be running (the game needs 
    - или **Copy lobby ID** и отправьте этот номер другу в любой мессенджер.
 
 **Гость (друг):**
-1. Загрузите своё сохранение (лучше ту же главу; если другая — мод сам переведёт вас к хосту).
+1. Оставайтесь в **главном меню** (своё сохранение загружать не нужно: мод начнёт совместное
+   прохождение в главе хоста сам, ваши сохранения не тронет).
 2. Подключитесь одним из способов:
    - примите приглашение в чате Steam (Shift+Tab) — мод подключится сам;
    - или в меню мода **Refresh friends** → **Join <имя хоста>**;
    - или вставьте номер в поле **Lobby ID** и нажмите **Join by ID**.
-3. Через пару секунд вы увидите друг друга. Если далеко — **Teleport to partner**.
+3. Игра начнётся в главе хоста; через пару секунд вы увидите друг друга. Если далеко — **Teleport to
+   partner**. (Старый способ — со своего сохранения — остаётся, если снять галочку **Join as a co-op
+   playthrough from the main menu**.)
 
 Если не подключается:
 - «not a RE9 co-op lobby» / «host runs another mod version» — у вас разные версии мода;
@@ -213,6 +230,11 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   the locker's glass door opens and its item can be taken, the safe opens with its items, the
   notebook shows the note and gives the document, the emblems show in the door window, and putting
   in an emblem afterwards works as usual.
+- v0.10.0: a co-op playthrough on one PC (the host's side played through the self-test echo): from the
+  main menu a new game straight in Chap3_20 on the host's difficulty, the game's own autosave there
+  skipped by the mod (the save files unchanged), a copy of the host's things (the gun with its 9
+  rounds, 40 spare, the flamethrower, healing, equipped weapons, shortcuts), the guest's things kept
+  and given back when they joined again; the partner's hair (strand hair) on screen.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
@@ -272,8 +294,9 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   the guest's copy is taken from their hands (if it's still there as it came out).
 - After a game over the player who died starts from their own last save; the partner's chapter state
   is sent to them, but they still have to walk (or "Teleport to partner") back to them.
-- The guest's co-op save is an autosave: it takes the place of the guest's oldest autosave, like the
-  game's own autosaves do.
+- In a co-op playthrough a game over or "Restart" loads the guest's own last save (the co-op
+  playthrough isn't in their save slots): the guest goes back to the main menu and joins again; what
+  they carried is kept. Health upgrades are the new game's, not carried over.
 - Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
 - Of the items the game makes during play, only enemy drops are shared; anything else it spawns is
   each player's own.

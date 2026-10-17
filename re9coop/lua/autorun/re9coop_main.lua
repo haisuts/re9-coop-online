@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.9.2"
-local PROTO = 8
+local VERSION = "0.10.0"
+local PROTO = 9
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -44,6 +44,7 @@ local cfg = {
     gimmick_sync = true,      -- share gimmick states (locks, puzzles, switches, used keys)
     story_sync = true,        -- share story progress (level flow steps); experimental
     follow_host = true,       -- the guest goes to the host's chapter
+    fresh_join = true,        -- the guest joins from the main menu into a co-op playthrough (own saves untouched)
     box_sync = true,          -- one item box for both players
     save_with_host = true,    -- the guest's game autosaves whenever the host's game saves
     revive = true,            -- a lethal hit downs you while your partner is with you; they get you up
@@ -333,7 +334,7 @@ local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
-    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32 }
+    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
@@ -540,6 +541,7 @@ function Puppet:build_step()
         end
     end
     self.loads = {}
+    pcall(Puppet.bind_strands, self)
     local by_name = {}
     local js = rtr:call("get_Joints")
     for _, j in ipairs(elements(js) or {}) do by_name[j:call("get_Name")] = j end
@@ -550,10 +552,56 @@ function Puppet:build_step()
     say("%s's character is ready (%d parts)", self.name, #self.parts)
 end
 
+-- Strand hair (Leon's, Grace's): a child "..._Strand_Hair" of the hair part whose GpuStrandsDynamics the
+-- game's costume system binds to the part named by its MontageStrandsDynamicsBinder ("10", the face). A
+-- puppet has no costume system: its strands stayed unbound, blew up (bounds of 100 km) and the partner
+-- looked bald. They are bound here to the puppet's own part, and reset once the puppet stands where it
+-- is (the first pose, a teleport), or they would trail from where it was.
+Puppet.STRANDS = { dyn = sdk.typeof("via.dynamics.GpuStrandsDynamics"), binder = sdk.typeof("app.MontageStrandsDynamicsBinder"),
+    ref = sdk.find_type_definition("via.GameObjectRef") }
+
+function Puppet:bind_strands()
+    local T = Puppet.STRANDS
+    local by_slot = {}
+    for _, go in ipairs(self.parts) do
+        local slot = go:call("get_Name"):match("^ch%d%d%d%d_(%d%d)_")
+        if slot then by_slot[slot] = go end
+    end
+    self.strands = {}
+    for _, go in ipairs(self.parts) do
+        local c = go:call("get_Transform"):call("get_Child")
+        while c do
+            local g = c:call("get_GameObject")
+            local d = g and g:call("getComponent(System.Type)", T.dyn)
+            local b = d and g:call("getComponent(System.Type)", T.binder)
+            local target = b and by_slot[b:call("get_BindTargetName")]
+            if target then
+                local ref = ValueType.new(T.ref)
+                ref:call(".ctor(via.GameObject)", target)
+                d:call("set_BindingGameObject", ref)
+                self.strands[#self.strands + 1] = d
+            end
+            c = c:call("get_Next")
+        end
+    end
+end
+
 function Puppet:apply(pos, rot, s_a, s_b, f)
     local rtr = self.root:call("get_Transform")
     rtr:call("set_Position", pos)
     rtr:call("set_Rotation", rot)
+    if self.strands and #self.strands > 0 then
+        if self.strand_pos == nil or (pos - self.strand_pos):length() > 3 then self.strand_reset = 2 end
+        self.strand_pos = pos
+        if self.strand_reset then
+            -- two frames later: the joints have taken the new pose by then
+            self.strand_reset = self.strand_reset - 1
+            if self.strand_reset <= 0 then
+                self.strand_reset = nil
+                for _, d in ipairs(self.strands) do pcall(d.call, d, "ResetSimulation") end
+            end
+        end
+    end
     local ja, jb = s_a.j, s_b.j
     for i, j in ipairs(self.jmap) do
         if j and ja[i] then
@@ -872,6 +920,8 @@ local function on_ctrl(from, data)
         ext.cut_ctrl(from, kind, data)
     elseif (kind == MSG.DROP or kind == MSG.DROP_TAKEN) and ext.drops_ctrl then
         ext.drops_ctrl(from, kind, data)
+    elseif kind >= MSG.PLAY_REQ and kind <= MSG.KIT and ext.fresh_ctrl then
+        ext.fresh_ctrl(from, kind, data)
     end
 end
 
@@ -1706,6 +1756,7 @@ world_shared = function()
     if me.go == nil or not cfg.world_sync then return false end
     if _G.re9coop_test_shared then return true end -- dev bridge only
     if loopback then return true end
+    if ext.fresh_hold and ext.fresh_hold() then return false end -- a guest on their own save
     local st_net = session.status
     return st_net ~= nil and st_net.state == "in_lobby" and session.last_members ~= ""
 end
@@ -2466,6 +2517,7 @@ local function jump_to_chapter(name)
         pcall(lf.call, lf, "requestGameJump")
     end)
     story.stats.jumps = story.stats.jumps + 1
+    if ext.fade_arm then ext.fade_arm() end
     say("going to %s", name)
     return true
 end
@@ -2803,6 +2855,17 @@ local function join_merge(key, inv, entries, from)
             ops_there[#ops_there + 1] = "+" .. x.e
         end
     end
+    -- a guest in a co-op playthrough takes the owner's box as it is: what the new game put in theirs
+    -- (a chapter's starting things) goes, nothing goes back
+    if ext.fresh and ext.fresh.active then
+        for _, x in ipairs(list) do
+            if (mine[x.id] or 0) > 0 then
+                mine[x.id] = mine[x.id] - 1
+                pcall(inv.call, inv, SIG_REMOVE, x.key, EVENT_MOVED)
+            end
+        end
+        ops_there = {}
+    end
     if #ops_here > 0 then apply_ops(inv, ops_here) end
     if #ops_there > 0 then send_ctrl(pack_box(key, FLAG_OPS, ops_there), from) end
     say("item box %s: got %d, sent %d", key, #ops_here, #ops_there)
@@ -2915,8 +2978,10 @@ if M_GUI_UPDATE then
     end, nil)
 end
 
+box.read_box, box.panel_entry, box.add_entry = read_box, panel_entry, add_entry
+box.remove_panel = function(inv, key) return pcall(inv.call, inv, SIG_REMOVE, key, EVENT_MOVED) end
 -- dev
-box.read_box, box.box_inventories, box.pack_box = read_box, box_inventories, pack_box
+box.box_inventories, box.pack_box = box_inventories, pack_box
 end
 
 -------------------------------------------------------------------------------------------------
@@ -3059,6 +3124,7 @@ ext.cut_gui = function()
             cut.replaying = false
             if ok and done then
                 cut.stats.applied, cut.fade_check = cut.stats.applied + 1, t + 8
+                if ext.fade_arm then ext.fade_arm() end
                 say("your partner skipped the cutscene")
             end
         end
@@ -3364,6 +3430,370 @@ end
 end
 
 -------------------------------------------------------------------------------------------------
+-- the guest's co-op playthrough
+-------------------------------------------------------------------------------------------------
+-- A guest who brings their own save into the host's world clashes with it: their story, chapter and
+-- item box are their own (a guest from Chap4 jumped back into Chap3_02 got a black screen, and their
+-- item box went into the host's). With "Join as a co-op playthrough" (on by default) the guest joins
+-- from the main menu: their game starts a new game right in the host's chapter on the host's
+-- difficulty (GameDifficultyManager.setNewGameDifficulty, TitleFlowController.onNewGame, then
+-- MainGameFlowManager.setNewGameSceneName: onNewGame sets it back to Chap1_00; the scene loads after
+-- the fade), and the host's world comes in as on any join (story, locks, puzzles, item box, recipes).
+-- While it lasts the guest's game saves nothing into game slots (save requests are skipped; the
+-- system slot with settings and achievements still saves), so their own saves are never touched.
+-- What the guest carries (both characters' hands: items, the ammo in guns, money, the pouch level,
+-- equipped weapons and shortcuts) is kept by the mod in re9coop_coop_<host's Steam ID>.json, written
+-- when the host's game saves, every 2 minutes and when the guest leaves, and put back the next time
+-- they join that host; the first time they get a copy of what the host carries. A guest who joins
+-- while playing their own save is asked to go to the main menu first; until then nothing of the two
+-- worlds is shared. A load in the co-op playthrough (a game over, "Restart") loads the guest's own
+-- last save: the co-op playthrough ends there (what they carried is kept).
+-- (a function of its own: the main chunk is at Lua's limit of 200 locals)
+;(function()
+local T_TITLE = sdk.typeof("app.TitleFlowController")
+local T_DIFFICULTY = sdk.find_type_definition("app.GameDifficultyID")
+local T_EQUIP = sdk.find_type_definition("app.InventoryEquipSlot")
+local T_SHORTCUT = sdk.find_type_definition("app.InventoryShortcutSlot")
+local EQUIP = { "Primary", "Secondary" }
+local SHORTCUTS = { "Equip_Up", "Equip_Up2", "Equip_Down", "Equip_Down2", "Equip_Left", "Equip_Left2", "Equip_Right", "Equip_Right2" }
+local PLAY_START, PLAY_KIT = 1, 2
+local CAT_SYSTEM = 1 -- app.SaveSlotCategory.System
+local fresh = {
+    active = false,     -- in a co-op playthrough: our game slots don't save
+    phase = nil,        -- "asked" (the host's chapter), "starting", "arrived", "await_kit", "playing"
+    host = nil, chapter = nil, t = 0, title_t = 0, title = false, saved_t = 0,
+    fade_since = nil, fade_t = 0,
+}
+ext.fresh = fresh
+
+local function title_controller()
+    local sm = sdk.get_native_singleton("via.SceneManager")
+    local scene = sm and sdk.call_native_func(sm, sdk.find_type_definition("via.SceneManager"), "get_CurrentScene")
+    local list = scene and scene:call("findComponents(System.Type)", T_TITLE)
+    local all = elements(list)
+    return all and all[1] or nil
+end
+
+local function guest_session()
+    if _G.re9coop_test_guest then return _G.re9coop_test_guest end -- dev bridge only
+    local st = session.status
+    if st == nil or st.state ~= "in_lobby" or st.is_host or not st.owner or st.owner == "" or st.owner == st.me then return nil end
+    return st
+end
+
+-- the guest plays their own save in someone's lobby: nothing is shared until they're in the
+-- co-op playthrough
+ext.fresh_hold = function()
+    return cfg.fresh_join and not fresh.active and guest_session() ~= nil
+end
+
+local function static_of(t, name)
+    local f = t and t:get_field(name)
+    local ok, v = pcall(function() return f and f:get_data(nil) end)
+    return ok and v or nil
+end
+
+-- our hands, one inventory per character (board type 0)
+local function hand_inventories()
+    local m = sdk.get_managed_singleton("app.InventoryManager")
+    local d = m and m:get_field("_Inventories")
+    local n = d and d:get_field("_count") or 0
+    local out = {}
+    for i, e in ipairs(elements(d and d:get_field("_entries")) or {}) do
+        if i > n then break end
+        local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
+        local k = inv and inv:get_field("_InventoryKey")
+        local u = k and k:get_field("_User")
+        if k and u and k:get_field("_BoardType") == 0 and not k:get_field("_IsTemporal") then
+            local ok, name = pcall(u.call, u, "ToString")
+            if ok and name then out[name] = inv end
+        end
+    end
+    return out
+end
+
+local function position_of(st)
+    local p = st and st:call("get_Position")
+    return p and (p.x .. "," .. p.y) or nil
+end
+
+-- what we carry, for both characters
+local function read_kit()
+    local kit = {}
+    for user, inv in pairs(hand_inventories()) do
+        local u = { level = inv:call("get_Level"), money = inv:call("get_Moneys"), panels = {}, equip = {}, shortcuts = {} }
+        for _, st in ipairs(elements(inv:call("getPanelStates")) or {}) do
+            local e = box.panel_entry(st)
+            if e then u.panels[#u.panels + 1] = e end
+        end
+        for _, s in ipairs(EQUIP) do
+            local ok, st = pcall(inv.call, inv, "getEquipPanelState", static_of(T_EQUIP, s), false)
+            u.equip[s] = ok and position_of(st) or nil
+        end
+        for _, s in ipairs(SHORTCUTS) do
+            local ok, st = pcall(inv.call, inv, "getShortcutPanelState", static_of(T_SHORTCUT, s), false)
+            u.shortcuts[s] = ok and position_of(st) or nil
+        end
+        kit[user] = u
+    end
+    return kit
+end
+
+-- make our hands hold exactly that (inside the game's GUI update)
+local function apply_kit(kit)
+    local invs = hand_inventories()
+    local n = 0
+    for user, u in pairs(kit) do
+        local inv = invs[user]
+        if inv then
+            if u.level then pcall(inv.call, inv, "setLevel", u.level) end
+            local money = inv:call("get_Moneys") or 0
+            if u.money and u.money ~= money then pcall(inv.call, inv, "mergeMoneys", u.money - money) end
+            for _, x in ipairs(box.read_box(inv)) do box.remove_panel(inv, x.key) end
+            for _, e in ipairs(u.panels or {}) do
+                if box.add_entry(inv, e) then n = n + 1 else say("couldn't put %s in your hands", e:match("^[^|]*")) end
+            end
+            local at = {}
+            for _, st in ipairs(elements(inv:call("getPanelStates")) or {}) do
+                local pos = position_of(st)
+                if pos then at[pos] = st:call("get_Key") end
+            end
+            for _, s in ipairs(EQUIP) do
+                local pos = (u.equip or {})[s]
+                if pos and at[pos] then pcall(inv.call, inv, "setEquip", at[pos], static_of(T_EQUIP, s))
+                elseif not pos then pcall(inv.call, inv, "resetEquip", static_of(T_EQUIP, s)) end
+            end
+            for s, pos in pairs(u.shortcuts or {}) do
+                if at[pos] then pcall(inv.call, inv, "setShortcut", at[pos], static_of(T_SHORTCUT, s), false) end
+            end
+        end
+    end
+    return n
+end
+
+local function kit_file(host)
+    return "re9coop_coop_" .. tostring(host) .. ".json"
+end
+
+local function store_kit(why)
+    if not fresh.active or fresh.host == nil or me.go == nil or fresh.phase ~= "playing" then return end
+    local ok, kit = pcall(read_kit)
+    if not ok or next(kit) == nil then return end
+    fresh.saved_t = now()
+    fs.write(kit_file(fresh.host), json.dump_string({ kit = kit, chapter = me.chapter, t = os.time() }))
+    if why then say("your things in the co-op playthrough are kept (%s)", why) end
+end
+ext.fresh_store = store_kit
+
+local function load_kit(host)
+    local ok, s = pcall(fs.read, kit_file(host))
+    if not ok or s == nil or s == "" then return nil end
+    local ok2, d = pcall(json.load_string, s)
+    return ok2 and type(d) == "table" and type(d.kit) == "table" and d.kit or nil
+end
+
+local function end_playthrough(why)
+    if not fresh.active then return end
+    fresh.active, fresh.phase = false, nil
+    say("co-op playthrough over (%s): your game saves as usual again", why)
+end
+
+-- at the main menu: a new game, right in the host's chapter, on the host's difficulty (GUI update)
+local function start_new_game(chapter, difficulty)
+    local tfc = title_controller()
+    local mg = sdk.get_managed_singleton("app.MainGameFlowManager")
+    if tfc == nil or mg == nil then return false end
+    local dm = sdk.get_managed_singleton("app.GameDifficultyManager")
+    local id = static_of(T_DIFFICULTY, difficulty)
+    if dm and id then pcall(dm.call, dm, "setNewGameDifficulty", id) end
+    tfc:call("onNewGame")
+    mg:call("setNewGameSceneName", chapter)
+    return true
+end
+
+-- game-slot saves are skipped during a co-op playthrough
+do
+    local T_SSM = sdk.find_type_definition("app.SaveServiceManager")
+    local skipped = false
+    local function post(retval)
+        if skipped then
+            skipped = false
+            return sdk.to_ptr(0)
+        end
+        return retval
+    end
+    for _, sig in ipairs({
+        "requestSave(app.SaveSlotCategory, app.SaveSlotSelectionMethod, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+        "requestSave(app.SaveSlotCategory, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+        "requestSaveCore(app.SaveSlotCategory, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+        "requestSave(app.SaveSlotIndex, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+        "requestSave(app.SaveSlotAddress, System.Nullable`1<app.SavedataSaveRequestArgs>)",
+    }) do
+        local m = T_SSM:get_method(sig)
+        local by_category = sig:find("SaveSlotCategory", 1, true) ~= nil
+        if m then
+            sdk.hook(m, function(args)
+                skipped = false
+                if not fresh.active then return end
+                if by_category and (sdk.to_int64(args[3]) & 0xFFFFFFFF) == CAT_SYSTEM then return end
+                skipped = true
+                return sdk.PreHookResult.SKIP_ORIGINAL
+            end, post)
+        end
+    end
+    -- a load (game over, "Restart", "Load") brings the guest's own save back: the playthrough ends there
+    for _, m in ipairs(T_SSM:get_methods()) do
+        if m:get_name() == "requestLoad" then
+            sdk.hook(m, function()
+                if fresh.active then
+                    pcall(store_kit, "loading your own save")
+                    fresh.active, fresh.phase = false, nil
+                    say("co-op playthrough over: your own last save loads (join from the main menu again)")
+                end
+            end, nil)
+        end
+    end
+end
+
+-- the screen stayed black after a chapter change (the game's fade wasn't lifted): fade it in
+-- (only for 2 minutes after a scene change the mod brought about: a chapter followed, a co-op
+-- playthrough started, the partner's cutscene skip; the game's own fades are left alone)
+ext.fade_arm = function() fresh.fade_until = now() + 120 end
+
+local function fade_watch(t_now)
+    if t_now > (fresh.fade_until or 0) then fresh.fade_since = nil return end
+    if t_now < fresh.fade_t then return end
+    fresh.fade_t = t_now + 0.5
+    local f = sdk.get_managed_singleton("app.FadeManager")
+    local gm = sdk.get_managed_singleton("app.GuiManager")
+    local paused = gm and gm:call("get_ActiveGuiWithPause")
+    if f == nil or me.go == nil or in_cutscene() or paused or not f:call("isAnyFadeOut") then
+        fresh.fade_since = nil
+        return
+    end
+    fresh.fade_since = fresh.fade_since or t_now
+    if t_now - fresh.fade_since > 8 then
+        fresh.fade_since = nil
+        ext.later(function()
+            for t = 0, 8 do pcall(f.call, f, "requestFadeIn", t, 0.5, nil, nil) end
+        end)
+        say("the screen stayed black: faded it in")
+    end
+end
+
+ext.fresh_ctrl = function(from, kind, data)
+    local st = session.status
+    if kind == MSG.PLAY_REQ then
+        -- the lobby owner tells a guest where to start, or gives them a copy of what it carries
+        if not ((st and st.is_host) or _G.re9coop_test_owner) or me.go == nil then return end -- (dev bridge: test_owner)
+        local _, what = string.unpack("<BB", data)
+        if what == PLAY_START then
+            local dm = sdk.get_managed_singleton("app.GameDifficultyManager")
+            local ok, d = pcall(function() return dm:call("get_DifficultyID"):call("ToString") end)
+            local chapter = me.chapter:match("^(Chap%d+_%d%d)") or me.chapter
+            send_ctrl(string.pack("<Bs1s1", MSG.PLAY, chapter, ok and d or ""), from)
+            say("your partner starts a co-op playthrough in %s", chapter)
+        elseif what == PLAY_KIT then
+            local ok, kit = pcall(read_kit)
+            if ok then send_ctrl(string.pack("<Bs4", MSG.KIT, json.dump_string(kit)), from) end
+        end
+    elseif kind == MSG.PLAY then
+        local g = guest_session()
+        if fresh.phase ~= "asked" or not (g and from == g.owner) then return end
+        local _, chapter, difficulty = string.unpack("<Bs1s1", data)
+        fresh.phase, fresh.t, fresh.host, fresh.chapter = "starting", now(), from, chapter
+        fresh.active = true
+        ext.later(function()
+            if start_new_game(chapter, difficulty) then
+                ext.fade_arm()
+                say("starting a co-op playthrough in %s (your own saves aren't touched)", chapter)
+            else
+                fresh.active, fresh.phase = false, nil
+            end
+        end)
+    elseif kind == MSG.KIT then
+        if fresh.phase ~= "await_kit" then return end
+        local _, s = string.unpack("<Bs4", data)
+        local ok, kit = pcall(json.load_string, s)
+        if not ok or type(kit) ~= "table" then return end
+        fresh.phase = "playing"
+        ext.later(function()
+            local n = apply_kit(kit)
+            say("you start with a copy of what the host carries (%d things)", n)
+            store_kit()
+        end)
+    end
+end
+
+ext.fresh_late = function(t_now)
+    if t_now >= fresh.title_t then
+        fresh.title_t = t_now + 1
+        fresh.title = me.go == nil and title_controller() ~= nil
+    end
+    -- back at the main menu after playing it (not while the new game is still on its way)
+    if fresh.active and fresh.title and fresh.phase ~= "starting" then end_playthrough("back at the main menu") end
+    if fresh.phase == "starting" and me.go == nil and t_now - fresh.t > 90 then
+        fresh.active, fresh.phase = false, nil
+        say("the co-op playthrough didn't start: trying again")
+    end
+    if me.go then pcall(fade_watch, t_now) end
+    local st = guest_session()
+    if st == nil or not cfg.fresh_join then
+        if fresh.active and fresh.phase == "playing" and fresh.left_t == nil then
+            fresh.left_t = t_now
+            store_kit("you left the session")
+        end
+        if fresh.phase == "asked" then fresh.phase = nil end
+        return
+    end
+    fresh.left_t = nil
+    if me.go == nil then
+        -- at the main menu: ask the host where it is
+        if not fresh.active and fresh.title and (fresh.phase == nil or (fresh.phase == "asked" and t_now - fresh.t > 5)) then
+            send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_START), st.owner)
+            fresh.phase, fresh.t = "asked", t_now
+        end
+        return
+    end
+    if not fresh.active then return end
+    if fresh.phase == "starting" and me.chapter ~= "" then
+        fresh.phase, fresh.t = "arrived", t_now
+    elseif fresh.phase == "arrived" and t_now - fresh.t > 3 and not in_cutscene() then
+        local kit = load_kit(fresh.host)
+        if kit then
+            fresh.phase = "playing"
+            ext.later(function()
+                local n = apply_kit(kit)
+                say("your things from the last co-op session are back (%d)", n)
+                fresh.saved_t = now()
+            end)
+        else
+            send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_KIT), fresh.host)
+            fresh.phase, fresh.t = "await_kit", t_now
+        end
+    elseif fresh.phase == "await_kit" and t_now - fresh.t > 10 then
+        send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_KIT), fresh.host)
+        fresh.t = t_now
+    elseif fresh.phase == "playing" and t_now - fresh.saved_t > 120 then
+        pcall(store_kit)
+    end
+end
+
+ext.fresh_draw = function()
+    local msg
+    if fresh.phase == "asked" or fresh.phase == "starting" then
+        msg = "Starting the co-op playthrough in the host's chapter..."
+    elseif ext.fresh_hold() and me.go then
+        msg = "You're in the host's lobby with your own save: go to the main menu (Esc > Quit), the co-op playthrough starts there. Your own save isn't touched."
+    end
+    if msg then draw.text(msg, 960 - #msg * 3.5, 80, 0xFF80FFFF) end
+end
+
+-- dev
+fresh.read_kit, fresh.apply_kit, fresh.start_new_game, fresh.load_kit = read_kit, apply_kit, start_new_game, load_kit
+end)()
+
+-------------------------------------------------------------------------------------------------
 -- saving together
 -------------------------------------------------------------------------------------------------
 -- When the lobby owner's game saves (an autosave or a typewriter save), the guest's game makes an
@@ -3439,6 +3869,11 @@ end
 ext.saves_ctrl = function(from, kind, data)
     local st_net = session.status
     if not world_shared() or not cfg.save_with_host or not st_net or from ~= st_net.owner or st_net.is_host then return end
+    -- a co-op playthrough isn't saved by the game: the mod keeps what the guest carries
+    if ext.fresh and ext.fresh.active then
+        if ext.fresh_store then ext.fresh_store("the host saved") end
+        return
+    end
     local _, chapter = string.unpack("<Bs1", data)
     saves.pending = { since = now(), chapter = chapter }
     say("the host saved: saving here too")
@@ -3960,6 +4395,8 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("recipe error: %s", tostring(err)) end
     ok, err = pcall(ext.sync_late, t_now)
     if not ok then say("sync error: %s", tostring(err)) end
+    ok, err = pcall(ext.fresh_late, t_now)
+    if not ok then say("co-op playthrough error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
@@ -3977,6 +4414,7 @@ re.on_frame(function()
         draw.text(msg, 960 - #msg * 3.5, 60, 0xFF80FFFF)
     end
     if ext.life_draw then pcall(ext.life_draw) end
+    if ext.fresh_draw then pcall(ext.fresh_draw) end
     if ext.mark_draw then
         local ok, err = pcall(ext.mark_draw)
         if not ok then
@@ -4134,6 +4572,7 @@ re.on_draw_ui(function()
     c, v = imgui.checkbox("Share what enemies drop", cfg.share_drops); if c then cfg.share_drops, changed = v, true end
     c, v = imgui.checkbox("Share story progress (experimental)", cfg.story_sync); if c then cfg.story_sync, changed = v, true end
     c, v = imgui.checkbox("Follow the host to new chapters (guest)", cfg.follow_host); if c then cfg.follow_host, changed = v, true end
+    c, v = imgui.checkbox("Join as a co-op playthrough from the main menu (guest; your saves untouched)", cfg.fresh_join); if c then cfg.fresh_join, changed = v, true end
     c, v = imgui.checkbox("One item box for both players", cfg.box_sync); if c then cfg.box_sync, changed = v, true end
     c, v = imgui.checkbox("Save when the host saves (guest; an autosave)", cfg.save_with_host); if c then cfg.save_with_host, changed = v, true end
     c, v = imgui.checkbox("Go down instead of dying while your partner is with you", cfg.revive); if c then cfg.revive, changed = v, true end

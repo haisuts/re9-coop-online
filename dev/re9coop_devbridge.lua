@@ -158,15 +158,17 @@ end)
 
 -- Save guard for tests: while reframework/data/re9coop_bridge/block_saves.flag holds "1", every save
 -- request (game slots and the system slot) is skipped and listed in dev.saves, so tests never write
--- the player's save files, and no Steam achievement is unlocked.
+-- the player's save files, and no Steam achievement is unlocked. "2" skips only the system slot (to
+-- test the mod's own blocking of game-slot saves: back the save folder up first).
 local SAVE_FLAG = "re9coop_bridge/block_saves.flag"
-local block_t, block_v = -1, false
+local block_t, block_v, block_mode = -1, false, ""
 local function saves_blocked()
     local t = os.clock()
     if t - block_t > 1 then
         block_t = t
         local ok, s = pcall(fs.read, SAVE_FLAG)
-        block_v = ok and s ~= nil and s:sub(1, 1) == "1"
+        block_mode = ok and s ~= nil and s:sub(1, 1) or ""
+        block_v = block_mode == "1" or block_mode == "2"
     end
     return block_v
 end
@@ -190,6 +192,7 @@ for _, sig in ipairs({
             local a = sdk.to_int64(args[3]) & 0xFFFFFFFF
             local b = sdk.to_int64(args[4]) & 0xFFFFFFFF
             local block = saves_blocked() -- system saves too (they carry achievement progress)
+            if block and block_mode == "2" then block = sig:find("SaveSlotCategory", 1, true) ~= nil and a == 1 end
             local line = string.format("%s %s %d %d %s", os.date("%H:%M:%S"), short, a, b, block and "BLOCKED" or "passed")
             dev.saves[#dev.saves + 1] = line
             log.info("[re9coop devbridge] save " .. line)

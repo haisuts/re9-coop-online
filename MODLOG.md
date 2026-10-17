@@ -575,6 +575,56 @@ down, the hint panel), recordings played back as the partner on a fresh game, an
   kananlib and FreeType (FTL) at the revisions its cmake.toml pins. tools/package.py takes the dll
   from _deps/REFramework-nightly/ (downloads the pinned nightly zip if missing) and checks the hash.
 
+## v0.10.0 (2026-10-17) — the guest plays in the host's story; the partner's hair
+
+A two-PC session (a friend's logs): the friend loaded their own save (Leon, Chap4_1020), joined, was
+taken back to Chap3_02 (Grace) by the follow, then into Chap3_20 by the host's skipped cutscene, and
+was left on a black screen, with no cutscene; the box sync sent their 21 box items into the host's
+box; the host saw the friend's Leon bald.
+
+- The partner's hair: Leon's hair is strand hair, a child "ch0100_21_00_Strand_Hair" of part 21
+  (via.render.Strands, via.dynamics.GpuStrandsDynamics, app.MontageStrandsDynamicsBinder with
+  BindTargetName "10"). The game's costume system binds the dynamics to the face part; a puppet has
+  none, so its strands stayed unbound (StrandCount 0, Initialized false) and their bounds blew up to
+  +-138 km: bald. Fixed: GpuStrandsDynamics.set_BindingGameObject(GameObjectRef(.ctor(GameObject))) to
+  the puppet's own part named by the binder, ResetSimulation two frames after the first pose and after
+  any jump of more than 3 m. Verified on the echo (bald before, hair after; nothing else changed).
+  Not it: the part-21 mesh (same mesh, material, parts, LOD, material variables as ours: drawn but the
+  card hair is hidden while strands are on), the ShellFurMesh parts 01/02/40 (stubble).
+  ch0100_41_000.pfb / ch0100_44_000.pfb in the friend's reframework_faulty_files.txt are just prefab
+  names the puppet builder tried first (it found _001).
+- Saves can't be handed over: DSSS files, encrypted (entropy 8.00 bits per byte), keyed per account.
+- New game straight in a chapter: GameDifficultyManager.setNewGameDifficulty(GameDifficultyID.ID00x0),
+  TitleFlowController.onNewGame() (it calls SaveServiceManager.requestNewgame, the handlers'
+  setupNewgame, LevelFlowManager.requestReset, and sets NewGameSceneName back to Chap1_00), then
+  MainGameFlowManager.setNewGameSceneName(chapter): the scene loads after the fade. Tested: Chap3_20
+  (Leon, no intro, control, an empty inventory). Quitting to the title already runs requestReset +
+  requestNewgame (the title's data is a new game's). The title's GUI update hook runs, so the mod's
+  GUI-thread jobs work there. A follow jump from a new game into Chap3_02 also worked (Grace with one
+  gun).
+- Guest co-op playthrough (cfg.fresh_join): at the main menu the guest sends PLAY_REQ(1); the lobby
+  owner answers PLAY (chapter "Chap%d_%d%d", difficulty "ID0030"); the guest starts the new game,
+  then on arrival restores its kit from re9coop_coop_<host>.json or asks for one (PLAY_REQ(2) -> KIT,
+  JSON: per hand inventory (User00 Grace, User01 Leon) level, money, panels as the box's
+  "item|count|rot|ammo@x,y", equip Primary/Secondary and shortcuts Equip_Up..Right2 by slot
+  position; applied with setLevel, mergeMoneys, removePanel/addPanel/reloadDirect, setEquip /
+  resetEquip, setShortcut). Saves while active: the requestSave(Category...) / requestSaveCore /
+  requestSave(Index|Address) requests are skipped unless the category is System (1). A requestLoad
+  ends the playthrough (the guest's own save loads). The guest's box takes the owner's as it is
+  (extras removed, nothing sent back). On their own save in a lobby the guest gets nothing shared
+  (world_shared false) and a hint. Verified on one PC: phase asked -> new game in Chap3_20 on ID0030;
+  the game's autosave there (requestSave Auto/EmptyOrOldest, let through by the dev guard in its new
+  "2" mode) skipped by the mod, all save files byte-identical after; the host's kit applied (same
+  panels, ammo 9/40 on screen; Leon's empty Primary comes back holding the handgun: the game equips a
+  gun when there is one, resetEquip doesn't keep it empty), kit stored,
+  10 extra rounds given, stored, quit to the title (playthrough ended), joined again: the 10 rounds
+  were back. PLAY_REQ / PLAY / KIT also round-tripped through the net plugin's loopback.
+- Black screen: FadeManager.isAnyFadeOut with a player, no cutscene, no pause GUI for 8 s, within
+  2 minutes of a scene change the mod brought about (follow jump, co-op playthrough start, the
+  partner's skip) -> requestFadeIn on fade types 0-8. Seen firing on a forced fade; not armed for the
+  game's own fades (it fired once on a normal Continue load before it was limited).
+- PROTO 9 (new messages PLAY_REQ 33, PLAY 34, KIT 35).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
