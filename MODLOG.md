@@ -820,6 +820,37 @@ This version adds what could be built and checked on one PC; see "Next steps" fo
   them fields true here and false at the host; after it: 0 story flows, 0 gimmicks, 0 items, 0 enemies,
   both copies of the players with 68 of 68 joints matched.
 
+## v0.12.2 (2026-10-19) — out of the world; zombies for both players, grabs seen and ended (stand)
+
+A player's report from the stand: after the guest's game over, "Continue" and everything stood still.
+
+- What happened: the host was down and came to "next to the partner" while the guest was on its game-
+  over screen; the guest's last pose was under the map, so the host fell through the world, and the
+  host's world the guest loaded on "Continue" had the host's position down there: both fell for good.
+- teleport_to_partner (and so "come to next to your partner") goes nowhere when the partner's last
+  pose is older than 1.5 s or the partner is off the ground (a new pose flag, 512).
+- Out of the world: the spots our player stood on (CharacterController.get_NumContactPrimitives > 0 and
+  not moving down faster than 3 m/s, steadily for 1 s: get_Ground and get_NumGroundContactPoints stay
+  false / 0 in this game even standing) are kept per chapter across loads and game overs; 40 m below
+  where a fall began, outside cutscenes, the player is warped back to a spot from 3 s before the fall
+  (further back on a second fall within 20 s: the newest spot can be the ledge the fall began on; a
+  guest put past a wall went back there four times and died). A warp needs a rotation too: with none it
+  doesn't move the player.
+- Checked on the stand: a player moved 60 m under the floor: back within a second. The guest killed,
+  "Continue": the host's world loaded, both on the floor, sync check 0 differences.
+- Enemies attack both players (stand, the kitchen corridor zombie): each enemy is run by the nearer
+  player and goes for them. Guest nearer: the guest's game ran it, it walked 16 m to the guest and hit
+  them 3 times; host nearer: 5 hits on the host. A hit shared with the partner standing next to the
+  victim was tried and dropped: not wanted, and it took too much (one hit, 600 HP); requestDamage called
+  from the GUI update hung the game.
+- Grabs: the guest saw the zombie grab and bite the host's character (filmed from 5 m; the zombie's and
+  the host's positions in the guest's game within 5 cm of the host's own; the "Host is grabbed" hint);
+  a grab isn't a cutscene here (the copy stays shown). The guest's lethal hit on its copy of the zombie
+  during the grab killed it in both games and the host's grab ended (rescues 1). The host watching the
+  guest's grab is the same code; not filmed (the zombie was killed first).
+- tools/fg.ps1: brings one window to the front (um win drive sends input to whichever re9 window is
+  in front: with two games, this picks the one).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.1
+# RE9 Co-op (online) — v0.12.2
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -11,6 +11,8 @@ from it is used.
 - **Shared enemies**: each enemy is run by the player it's closest to, so enemies hunt, grab and hurt
   both of you. The other player sees the same enemy pose for pose; their hits on it count, and an enemy
   killed by one player is dead in the other's game too.
+- **Out of the world**: a player who falls through the map (40 m below where the fall began) is put
+  back where they stood a few seconds before; nobody is sent to a partner who isn't standing anywhere.
 - **Your partner's sounds**: their footsteps (on whatever floor they walk on), clothes, breathing and
   hands come from their character in your game, besides their gun.
 - **Switches and breakables the game's way**: a light switch your partner flips or a crate they break
@@ -104,6 +106,9 @@ Both players need the same mod version. Steam has to be running (the game needs 
   вспышками выстрелов, звуками оружия, фонариком; над головой ник, здоровье в % и пинг.
 - **Враги:** каждым врагом управляет тот, к кому он ближе, — враги нападают на обоих; попадания
   обоих засчитываются; второй игрок видит того же врага движение в движение.
+- **Провал под карту:** игрок, провалившийся сквозь мир (на 40 м ниже места, где начал падать),
+  возвращается туда, где стоял несколько секунд назад; к напарнику, который сам падает, никого не
+  телепортирует.
 - **Звуки напарника:** его шаги (по тому полу, по которому он идёт), одежда, дыхание и руки звучат у
   вашей копии напарника, а не только его оружие.
 - **Выключатели и ломаемые предметы:** выключатель, который щёлкнул напарник, и ящик, который он
@@ -297,6 +302,13 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   both built the other's character. Before the fix below the guest's sync check found 442 of 684 gimmicks
   different (every false the host sent had come out true); after it: 0 story flows, 0 gimmicks, 0 items,
   0 enemies different, each copy of the other player with 68 of 68 joints matched.
+- v0.12.2 on the stand: a zombie goes for whichever player is nearer: with the guest nearer the guest's
+  game ran it and it walked 16 m to the guest and hit them 3 times, with the host nearer 5 hits on the
+  host. The guest filmed the host being grabbed (the zombie holding and biting the host's character,
+  positions within 5 cm of the host's own game, the "Host is grabbed" hint shown); the guest's hit on
+  its copy of the zombie during the grab killed it in both games and ended the grab (rescues 1). After
+  a guest's game over, "Continue" loaded the host's world and both stood on the floor; a player moved
+  60 m under the floor was put back within a second.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works

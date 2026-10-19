@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.1"
+local VERSION = "0.12.2"
 local PROTO = 12
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -356,6 +356,8 @@ local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 2
     BODY_SOUND = 39 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
+-- 512 (written as a number where used: the main chunk is at its 200 locals): off the ground, falling or
+-- out of the world; nobody's game sends them to us then
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
 
 local function q16(v)
@@ -413,6 +415,7 @@ local function local_flags()
     if in_cutscene and in_cutscene() then f = f | FLAG_CUTSCENE end
     if me.down then f = f | FLAG_DOWN end
     if me.grabbed then f = f | FLAG_GRABBED end
+    if me.falling then f = f | 512 end -- off the ground
     local fc = me.flashlight
     if fc and fc:get_field("_IsLighting") and fc:get_field("_CurrentLightObject") and fc:get_field("_CurrentLight") then
         f = f | FLAG_FLASHLIGHT
@@ -1940,11 +1943,114 @@ local function teleport_to_partner()
     if p == nil or me.pc == nil then return "no partner to go to" end
     if p.chapter ~= me.chapter then return "your partner is in " .. p.chapter end
     local s = p.snaps[#p.snaps]
+    -- not to a partner whose game isn't sending a live player standing somewhere (dead, a game over,
+    -- loading, off the ground): a host that came to next to a guest on their game-over screen fell
+    -- through the map to where that guest's last pose was, and the guest then loaded the host's world
+    -- down there too
+    if now() - (p.last or 0) > 1.5 or (p.flags or 0) & 512 ~= 0 then -- 512: off the ground
+        return "your partner isn't standing anywhere right now"
+    end
     local pos = s.pos + s.rot * Vector3f.new(0, 0, -1.0)
     local cm = character_manager()
     local ok = pcall(cm.call, cm, WARP_SIG, me.pc:call("get_ID"), nullable_vec3(pos), nullable_quat(s.rot))
     return ok and ("went to " .. p.name) or "couldn't move you"
 end
+-------------------------------------------------------------------------------------------------
+-- out of the world
+-------------------------------------------------------------------------------------------------
+-- The spots our player stood on (its CharacterController touching something, and not moving down
+-- fast: get_Ground and get_NumGroundContactPoints stay false / 0 here even standing, while
+-- get_NumContactPrimitives is 1 standing and 0 falling), per chapter and kept across loads and game
+-- overs (the player object changes, the chapter doesn't). Off the ground 40 m below where the fall
+-- began, outside a cutscene, we're out of the world: back to a spot from 3 s before it (a spot just
+-- before can be the ledge it began on: a guest warped past a wall went back there four times), or,
+-- with none, next to a partner who stands somewhere. Off the ground at all, the partner is told (flag 512), so nobody's game
+-- sends them to us then.
+;(function()
+local T_CC = sdk.typeof("via.physics.CharacterController")
+local OUT_OF_WORLD = 40
+local ground = { by_chapter = {}, t = 0, cc = nil, cc_go = 0, back_t = 0, since = nil, fall_from = nil, backs = {} }
+ext.ground = ground
+local SPOTS, STEADY, OLDER = 12, 1.0, 3.0
+
+-- standing spots of this chapter, newest last (one every 0.5 s while standing steadily for 1 s:
+-- a touch of a ledge on the way down isn't one)
+local function remember(t_now, p)
+    local list = ground.by_chapter[me.chapter]
+    if list == nil then list = {} ground.by_chapter[me.chapter] = list end
+    local last = list[#list]
+    if last and t_now - last.t < 0.5 then return end
+    list[#list + 1] = { t = t_now, pos = Vector3f.new(p.x, p.y, p.z) }
+    if #list > SPOTS then table.remove(list, 1) end
+end
+
+-- the spot to go back to: one from before the fall began, 3 s earlier than it at least (the oldest
+-- kept if none is); a second fall out of the world within 20 s goes back further
+local function spot_before(t_from)
+    local list = ground.by_chapter[me.chapter]
+    if list == nil or #list == 0 then return nil end
+    local recent = 0
+    for _, t in ipairs(ground.backs) do if t_from - t < 20 then recent = recent + 1 end end
+    local cut = t_from - OLDER * (1 + recent * 3)
+    for i = #list, 1, -1 do
+        if list[i].t <= cut then return list[i].pos end
+    end
+    return list[1].pos
+end
+
+ext.ground_tick = function(t_now)
+    if me.go == nil or t_now < ground.t then return end
+    ground.t = t_now + 0.25
+    if in_cutscene() then
+        me.falling, ground.since = false, nil
+        return
+    end
+    if ground.cc_go ~= me.go_addr then
+        ground.cc, ground.cc_go = me.go:call("getComponent(System.Type)", T_CC), me.go_addr
+        ground.since, ground.fall_from = nil, nil
+    end
+    local p = me.go:call("get_Transform"):call("get_Position")
+    local okg, contacts = pcall(ground.cc.call, ground.cc, "get_NumContactPrimitives")
+    local vy = ground.last_y and ground.last_t and (p.y - ground.last_y) / math.max(0.05, t_now - ground.last_t) or 0
+    ground.last_y, ground.last_t = p.y, t_now
+    if okg and contacts and contacts > 0 and vy > -3 then
+        ground.since = ground.since or t_now
+        ground.fall_from = nil
+        me.falling = false
+        if t_now - ground.since >= STEADY then remember(t_now, p) end
+        return
+    end
+    ground.since = nil
+    ground.fall_from = ground.fall_from or { t = t_now, y = p.y }
+    me.falling = true
+    if t_now < ground.back_t then return end
+    local target
+    local list = ground.by_chapter[me.chapter]
+    local ref = list and list[#list] and list[#list].pos
+    if ref and p.y < math.min(ref.y, ground.fall_from.y) - OUT_OF_WORLD then
+        target = spot_before(ground.fall_from.t)
+    elseif ref == nil and p.y < -OUT_OF_WORLD - 60 then
+        local pt = partner_to_follow()
+        local s = pt and pt.snaps[#pt.snaps]
+        if s and pt.chapter == me.chapter and t_now - (pt.last or 0) < 1.5 and (pt.flags or 0) & 512 == 0 then -- on the ground
+            target = s.pos
+        end
+    end
+    if target == nil then return end
+    ground.back_t = t_now + 3
+    ground.backs[#ground.backs + 1] = t_now
+    if #ground.backs > 4 then table.remove(ground.backs, 1) end
+    local to = Vector3f.new(target.x, target.y + 0.3, target.z)
+    ext.later(function()
+        local cm = character_manager()
+        -- (a warp needs both: with no rotation given it doesn't move the player)
+        local rot = me.go and me.go:call("get_Transform"):call("get_Rotation")
+        if cm and me.pc and rot then pcall(cm.call, cm, WARP_SIG, me.pc:call("get_ID"), nullable_vec3(to), nullable_quat(rot)) end
+    end)
+    say("you fell out of the world: back where you stood")
+end
+end)()
+
 
 -------------------------------------------------------------------------------------------------
 -- shared gimmick states: locks, puzzles, switches, used keys, solved locks...
@@ -5537,6 +5643,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
         for _, p in pairs(peers) do update_peer(p, t_now) end
         enemies_update(t_now)
         if ext.life_tick then ext.life_tick(t_now) end
+        if ext.ground_tick then ext.ground_tick(t_now) end
     end)
     if not ok then say("error: %s", tostring(err)) end
     if t_now - stats.rate_t >= 1 then
