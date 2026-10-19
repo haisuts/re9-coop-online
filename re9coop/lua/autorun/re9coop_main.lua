@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.11.2"
+local VERSION = "0.11.3"
 local PROTO = 11
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -1959,6 +1959,10 @@ gim = {
         ["app.structure.GmMotionData._IndexCount"] = true,
         ["app.structure.GmSwitchData._IndexCount"] = true,
         ["app.structure.GmDoorData._IsDoubleDoorClose"] = true,
+        -- an event's hold on a door (it follows the event's motion and can't be pushed): each game's own
+        -- event sets it and lets go of it. Sent, a guest's opening event held the host's doors for good
+        ["app.structure.GmDoorData._IsConstMode"] = true,
+        ["app.structure.GmDoorData._IsMotionFollowMode"] = true,
         ["app.structure.GmElevatorButtonData._IsButtonInteractable"] = true,
         ["app.structure.GmSafeData._PlaceIDHash"] = true,
         ["app.structure.GmContainerData._PlaceIDHash"] = true,
@@ -4764,6 +4768,77 @@ end
 check.digest, check.compare = digest, compare
 end)()
 
+-- Doors held by a scene that isn't playing. An event holds a door (GmDoorData._IsConstMode,
+-- _IsMotionFollowMode: the door follows the event's motion and can't be pushed) and lets go of it when it
+-- ends. Up to v0.11.1 a guest's whole-world resync (sent when the host came back from a checkpoint) carried
+-- such doors from the guest's own opening event into the host's game, where no event let go of them, and
+-- the host's save kept them: in Chap3_02 the security office door stayed shut (a host's save, 2026-10-17).
+-- "Free stuck doors" (host or alone, outside cutscenes) lets them go and unlocks again the ones this
+-- playthrough had opened (_IsDone); a door never opened stays locked as it was.
+;(function()
+local T_BASE = sdk.typeof("app.structure.GmBaseData")
+local T_DOOR_DATA = sdk.typeof("app.structure.GmDoorData")
+local fix = { count = 0, next_t = 0 }
+ext.doors_fix = fix
+
+local function stuck_doors()
+    world.refresh(now())
+    gim.contexts_of(now())
+    local out = {}
+    for id in pairs(world.doors or {}) do
+        local gc = gim.by_id and gim.by_id[id]
+        local ok, sdc = pcall(function() return gc and gc:call("get_SDC") end)
+        local dd = ok and sdc and sdc:call("getStructureData(System.Type)", T_DOOR_DATA)
+        if dd and dd:get_field("_IsConstMode") == true then
+            out[#out + 1] = { data = dd, base = sdc:call("getStructureData(System.Type)", T_BASE) }
+        end
+    end
+    return out
+end
+
+local function may_fix()
+    local st = session.status
+    local guest = st and st.state == "in_lobby" and not st.is_host
+    return me.go ~= nil and not guest and not in_cutscene()
+end
+
+-- how many (counted in the game's GUI update, every 3 s while the menu is open)
+fix.poll = function()
+    local t = now()
+    if t >= fix.next_t then
+        fix.next_t = t + 3
+        ext.later(function()
+            local ok, list = pcall(stuck_doors)
+            fix.count = (ok and may_fix()) and #list or 0
+        end)
+    end
+    return fix.count
+end
+
+fix.run = function()
+    ext.later(function()
+        if not may_fix() then
+            say("doors: only in the host's game or alone, outside cutscenes")
+            return
+        end
+        local n, opened = 0, 0
+        for _, d in ipairs(stuck_doors()) do
+            d.data:set_field("_IsConstMode", false)
+            d.data:set_field("_IsMotionFollowMode", false)
+            pcall(d.data.call, d.data, "onDirty")
+            if d.base and d.base:get_field("_IsDone") == true and d.base:get_field("_IsLock") == true then
+                d.base:set_field("_IsLock", false)
+                pcall(d.base.call, d.base, "onDirty")
+                opened = opened + 1
+            end
+            n = n + 1
+        end
+        fix.count, fix.next_t = 0, now() + 3
+        say("freed %d stuck doors (%d you had opened before are unlocked again); save to keep it", n, opened)
+    end)
+end
+end)()
+
 -------------------------------------------------------------------------------------------------
 -- saving together
 -------------------------------------------------------------------------------------------------
@@ -5534,6 +5609,11 @@ re.on_draw_ui(function()
     imgui.text(string.format("Story steps: sent %d, applied %d. Chapter jumps %d.", story.stats.sent, story.stats.applied, story.stats.jumps))
     imgui.text(string.format("Item box: changes sent %d, applied %d. Saves: told partner %d, saved with host %d.",
         box.stats.sent, box.stats.applied, saves.stats.sent, saves.stats.made))
+    local stuck = ext.doors_fix and ext.doors_fix.poll() or 0
+    if stuck > 0 then
+        imgui.text_colored(string.format("%d door(s) here are held by a scene that isn't playing: they can't be pushed open.", stuck), 0xFF40C0FF)
+        if imgui.button("Free stuck doors") then ext.doors_fix.run() end
+    end
 
     imgui.separator()
     local c, v = imgui.checkbox("Self test (see your own echo next to you)", loopback)

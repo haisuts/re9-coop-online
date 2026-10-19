@@ -740,6 +740,29 @@ A two-PC report: the host couldn't push doors open, and some stayed shut.
   further on than in an older save where two of them were open. Whether the story or the session locked
   them is unknown.
 
+## v0.11.3 (2026-10-19) — doors held by a scene that never plays
+
+The host still couldn't open the security office door of Chap3_02 (the save from the 2026-10-17 session).
+
+- What held it: GmDoorData._IsConstMode and _IsMotionFollowMode, the hold an event puts on a door (the
+  door follows the event's motion: _CurrActionType Const, it can't be pushed), set on four doors near the
+  start of Chap3_02 (Gm01_066, 074, 075, 149) and on none of the other ~55 doors there; an older save
+  of the same chapter has none. The guest of that session started the chapter as a new game, so its
+  opening event held those doors; the guest's whole-world resync (sent when the host came back from a
+  checkpoint) carried the hold into the host's game, where that event never ran to let go of it, and
+  the host's save kept it. Three of them were also locked again (_IsLock), see v0.11.2.
+- Those two fields are never sent or written now (each game's own event sets and clears them).
+- "Free stuck doors" in the menu, shown while any door here is held and no cutscene plays, in the host's
+  game or alone: lets every held door go and unlocks again the ones this playthrough had opened
+  (_IsDone); one never opened stays locked. Checked in that save: the same steps by hand let the four
+  doors go (Const to Normal, or to Lock for the one never opened), and the player then pushed the
+  security office door open to 90 degrees; the block's own code, loaded into that game with its upvalues
+  given, counted 0 held doors, then 1 after one was held again by hand, and let it go.
+- Flickering prompts (reported in the same session): a 4 s capture shows the button icons in three
+  versions frame to frame (normal, faded, black squares with no letters), as generated frames look. The
+  game runs with DLSS frame generation (2x); the mod draws nothing in solo play. Unknown yet whether
+  frame generation alone causes it, or with REFramework, or something else.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
