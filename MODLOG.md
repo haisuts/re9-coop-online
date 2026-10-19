@@ -696,6 +696,50 @@ host had taken, the enemies killed, the events seen.
   Not reproduced on one PC.
 - PROTO 10 (MSG.WORLD 36).
 
+## v0.11.1 (2026-10-19) — sync check; the partner's frozen pose
+
+Following the Co-op Anything playbook (github.com/cranebeaker/coop-anything, AGENTS.md: record the game's
+identity, test co-op with co-op, snapshot shared state from both clients and diff it, mutation twins).
+
+- Game identity: Steam build id 23634047, re9.exe SHA-256 9742b40b5a177cee95015714488fe7bdddbe5348892033b4c807d823a20ee168
+  (587,657,120 bytes); PE sections .xcode / .xtext / .udata / .trace / .sxdata (a protector, unknown which).
+- Sync check (the oracle): MSG.CHECK_REQ / CHECK; the answer is a JSON digest: story flows (637 in
+  Chap3_02), every gimmick's logical-field fingerprint (684, the same gimmick_state the live sync uses),
+  items lying about (world.items, ItemContext IsSpawn), enemies from CharacterManager.get_EnemyContextList
+  (spawned, dead, HP, position to 0.5 m, who runs it) and each puppet's state (built, visible, joints
+  matched, joints per pose, poses kept, age of the last). ~53 KB. The asking side diffs it against its own
+  (differing gimmick fields named from its own entries) and writes re9coop_sync_report.txt. Self-test:
+  0 differences against itself; mutation twin: exactly the 4 planted differences; loopback round trip.
+  An empty Lua table comes back from JSON as nothing: every list is defaulted before comparing.
+- The partner's frozen pose (a two-PC report: the friend's Grace moved about in one fixed pose): the
+  receiver keyed the copy on the costume only, so a rebuilt player with the same costume but its joints
+  in another order kept the old joint map and every pose went to the wrong joints. The joint names are
+  now part of the appearance key. On the sender, a new player object at the old one's address was taken
+  for the old one for up to 60 s (the scene-change guard compared addresses only): the guard now compares
+  the first joint too, and the joints are re-checked every second (count and first joint). Not confirmed
+  by a second session yet.
+- PROTO 11.
+
+## v0.11.2 (2026-10-19) — doors: the partner's pushes, no re-locking
+
+A two-PC report: the host couldn't push doors open, and some stayed shut.
+
+- The door push hook counted every addForce call as "ours, just now", the door's own closing included
+  (it calls addForce all the time): every push of the partner's then fell inside the 1.5 s window and was
+  dropped, so the door never opened for them. Only the pushes we share (Normal, UniformSpeed) count now.
+- The "settled" gate the story, locks and doors wait for counted a fade as "not settled" for good: some
+  rooms keep one of the fade layers down, and the partner's steps and locks never came in. A fade counts
+  only for the first 30 s after the player shows up.
+- The host takes from the guest only steps forward: a story flow never goes back (it did for the guest's
+  own earlier steps), and a gimmick is never locked again, undone, un-interacted or given back its keys
+  (GmBaseData._IsLock up, _IsDone / _IsInteracted / _UnlockCount down). The host's game is the world;
+  the guest still takes everything from the host. Checked on one PC with injected messages: the guest's
+  re-lock of an open lock refused, the host's applied; a guest's step back refused.
+- Found while looking: in a host's save made during a session four doors of Chap3_02 (Gm01_066, 074,
+  075, 149) are locked in the door's "const" mode (_IsConstMode, _IsAutoClose, _IsLock), with a story flow
+  further on than in an older save where two of them were open. Whether the story or the session locked
+  them is unknown.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.11.0"
-local PROTO = 10
+local VERSION = "0.11.2"
+local PROTO = 11
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -284,13 +284,28 @@ local function refresh_player()
     end
     local a = addr(go)
     -- a scene change was requested: the old player object is on its way out, leave it alone
+    -- (the old object, not just its address: a new player can be made at the very same address, and was
+    -- then ignored for a minute, or kept the old joints)
     if me.leaving then
-        if a == me.leaving.addr and now() < me.leaving.till then return false end
+        if a == me.leaving.addr and now() < me.leaving.till then
+            local js = go:call("get_Transform"):call("get_Joints")
+            local first = js and js:call("get_Length") > 0 and js:call("GetValue(System.Int32)", 0)
+            if first == nil or first:get_address() == me.leaving.joint then return false end
+            a = -1 -- a new player in the old one's place
+        end
         me.leaving = nil
+    end
+    -- the joints we read are the player's own (checked every second; they are rebuilt with the body)
+    if a == me.go_addr and me.joints and now() >= (me.joints_check or 0) then
+        me.joints_check = now() + 1
+        local js = go:call("get_Transform"):call("get_Joints")
+        local n = js and js:call("get_Length") or 0
+        local first = n > 0 and js:call("GetValue(System.Int32)", 0) or nil
+        if n ~= #me.joints or (first and me.joints[1] and first:get_address() ~= me.joints[1]:get_address()) then a = -1 end
     end
     if a ~= me.go_addr then
         forget_player()
-        me.pc, me.go, me.go_addr = pc, go, a
+        me.pc, me.go, me.go_addr = pc, go, addr(go)
         local js = go:call("get_Transform"):call("get_Joints")
         if js == nil then forget_player() return false end
         me.joints = js:get_elements()
@@ -334,7 +349,7 @@ local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
-    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36 }
+    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36, CHECK_REQ = 37, CHECK = 38 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
@@ -876,7 +891,10 @@ local function on_ctrl(from, data)
     elseif kind == MSG_APPEAR then
         local ok, a = pcall(read_appear, data)
         if not ok then return end
-        local key = appearance_key(a)
+        -- the joint list counts too: the same look on a new player object can come with its joints in
+        -- another order, and a copy built for the old order put every pose on the wrong joints (it stood
+        -- frozen in an odd pose while it moved about)
+        local key = appearance_key(a) .. "|" .. table.concat(a.names, ",")
         if p.appear_key ~= key then
             p.appear, p.appear_key = a, key
             if p.puppet then p.puppet:destroy() p.puppet = nil end
@@ -923,6 +941,8 @@ local function on_ctrl(from, data)
         ext.drops_ctrl(from, kind, data)
     elseif kind >= MSG.PLAY_REQ and kind <= MSG.WORLD and ext.fresh_ctrl then
         ext.fresh_ctrl(from, kind, data)
+    elseif (kind == MSG.CHECK_REQ or kind == MSG.CHECK) and ext.check_ctrl then
+        ext.check_ctrl(from, kind, data)
     end
 end
 
@@ -1756,6 +1776,7 @@ local function refresh_world(t_now)
 end
 
 world.scene_components = scene_components
+world.refresh = function(t) return refresh_world(t) end
 
 world_shared = function()
     if me.go == nil or not cfg.world_sync then return false end
@@ -1775,9 +1796,11 @@ sdk.hook(M_DOOR_FORCE, function(args)
     local info = sdk.to_managed_object(args[3])
     if info == nil then return end
     local action = info:get_field("ActionType")
+    if not DOOR_SHARED[action or 0] or action == DOOR_AUTO_CLOSE or #world.out >= 32 then return end
+    -- only our real pushes count as "ours" (the door's own closing calls this too, all the time: counted,
+    -- they made every push of the partner's be dropped and the door never opened for them)
     world.mine_at = world.mine_at or {}
     world.mine_at[id] = t
-    if not DOOR_SHARED[action or 0] or action == DOOR_AUTO_CLOSE or #world.out >= 32 then return end
     world.sent_at[id] = t
     world.out[#world.out + 1] = string.pack("<Bs1s1BfI4", MSG_DOOR, me.chapter, id, action or 0,
         info:get_field("Force") or 1.0, (info:get_field("ForceDir") or 1) & 0xFFFFFFFF)
@@ -2097,7 +2120,12 @@ local function gimmick_scan(t_now)
 end
 
 
-local function apply_gimmick(data)
+-- what a guest's game may not do to the host's: lock again, undo, take back keys. A guest's gimmick that
+-- starts from its own (earlier) data sends that data as a change; the host's open locks and doors went
+-- shut and stayed so in the host's save
+local GIMMICK_NO_UNDO = { _IsLock = "up", _IsDone = "down", _IsInteracted = "down", _UnlockCount = "down" }
+
+local function apply_gimmick(data, guest)
     local _, chapter, id, full, n, pos = string.unpack("<Bs1s1BH", data)
     if chapter ~= me.chapter then return end
     if (gim.hold[id] or 0) > now() then return "held" end
@@ -2146,6 +2174,14 @@ local function apply_gimmick(data)
             local dirty = false
             for fname, v in pairs(w) do
                 local ok, cur = pcall(x.get_field, x, fname)
+                local undo = guest and GIMMICK_NO_UNDO[fname]
+                if undo and ok then
+                    local a, b = cur == true and 1 or tonumber(cur) or 0, v == true and 1 or tonumber(v) or 0
+                    if (undo == "up" and b > a) or (undo == "down" and b < a) then
+                        gim.stats.kept = (gim.stats.kept or 0) + 1
+                        ok = false
+                    end
+                end
                 if ok and cur ~= v and not gim.unsaved[xt .. "." .. fname] then
                     x:set_field(fname, v)
                     dirty = true
@@ -2372,10 +2408,13 @@ end
 
 gimmick_ctrl = function(from, kind, data)
     if not world_shared() or not cfg.gimmick_sync or #gim.queue >= 2048 then return end
-    gim.queue[#gim.queue + 1] = { kind = kind, data = data }
+    local st_net = session.status
+    gim.queue[#gim.queue + 1] = { kind = kind, data = data, guest = not (st_net and from == st_net.owner) }
 end
 
 -- the partner's gimmick messages, applied inside the game's GUI update
+gim.state_of, gim.contexts_of, gim.id_of = gimmick_state, gimmick_contexts, context_id
+
 gim.gui_tick = function()
     if #gim.queue == 0 or not world_shared() then return end
     if ext.settled and not ext.settled() then return end -- (see the story's wait)
@@ -2388,7 +2427,7 @@ gim.gui_tick = function()
         end
         local ok, err
         if m.kind == MSG_GIMMICK then
-            ok, err = pcall(apply_gimmick, m.data)
+            ok, err = pcall(apply_gimmick, m.data, m.guest)
             if ok and err == "held" then gim.queue[#gim.queue + 1] = m end
         elseif m.kind == MSG_GIMMICK_FLAGS then
             ok, err = pcall(apply_gimmick_flags, m.data)
@@ -2476,7 +2515,9 @@ in_cutscene = function()
     return cutscene_cache.v
 end
 
-local function progress_list()
+local progress_list
+story.flows = function() return progress_list() end
+progress_list = function()
     local lf = level_flow()
     local d = lf and lf:get_field("_ProgressiveNumberList")
     local entries = d and d:get_field("_entries")
@@ -2505,15 +2546,22 @@ sdk.hook(M_SET_PROGRESS, function(args)
     end
 end, nil)
 
-local function apply_story(data)
+local function apply_story(data, from)
     local kind, chapter, hash, value = string.unpack("<Bs1I4i4", data)
     if chapter ~= me.chapter then return end
     local lf = level_flow()
     if lf == nil then return end
     local ok, cur = pcall(lf.call, lf, "getProgressiveNumber", hash)
     if ok and cur == value then return end
-    -- a whole-chapter catch-up only moves flows on, never back
-    if kind == MSG.STORY_FWD and ok and type(cur) == "number" and cur > value then return end
+    -- a whole-chapter catch-up only moves flows on, never back; and so do the guest's steps: a guest whose
+    -- world was behind (a new game in the chapter) sent its earlier steps, the host's flows went back and
+    -- the game locked again the doors those steps lock (found in a host's save after a session)
+    local st_net = session.status
+    local from_owner = st_net and from ~= nil and from == st_net.owner
+    if (kind == MSG.STORY_FWD or not from_owner) and ok and type(cur) == "number" and cur > value then
+        story.stats.back = (story.stats.back or 0) + 1
+        return
+    end
     story.expect[hash] = value
     pcall(lf.call, lf, "requestChangeProgressiveNumber", hash, value)
     story.stats.applied = story.stats.applied + 1
@@ -2567,10 +2615,10 @@ story_ctrl = function(from, kind, data)
     if not world_shared() or not cfg.story_sync then return end
     if kind ~= MSG_STORY and kind ~= MSG.STORY_FWD then return end
     if ext.settled and not ext.settled() then
-        if #story.wait < 4096 then story.wait[#story.wait + 1] = data end
+        if #story.wait < 4096 then story.wait[#story.wait + 1] = { data, from } end
         return
     end
-    pcall(apply_story, data)
+    pcall(apply_story, data, from)
 end
 
 story_reset = function()
@@ -2603,7 +2651,7 @@ story_late = function(t_now)
         local wait = story.wait
         story.wait = {}
         ext.later(function()
-            for _, d in ipairs(wait) do pcall(apply_story, d) end
+            for _, d in ipairs(wait) do pcall(apply_story, d[1], d[2]) end
         end)
         say("caught up with %d story steps from your partner", #wait)
     end
@@ -4336,7 +4384,9 @@ ext.fresh_ctrl = function(from, kind, data)
     end
 end
 
--- our game is free: a player, no cutscene, no fade, for 3 s
+-- our game is free: a player, no cutscene, no fade, for 3 s (a fade only counts for the first 30 s
+-- after the player shows up: some rooms keep one of the fade layers down for good, and the partner's
+-- locks and story then never came in)
 ext.settled = function()
     return fresh.calm_since ~= nil and now() - fresh.calm_since >= 3
 end
@@ -4378,7 +4428,8 @@ ext.fresh_late = function(t_now)
         say("the host's world didn't load: trying again")
     end
     local f = sdk.get_managed_singleton("app.FadeManager")
-    local calm = me.go ~= nil and not in_cutscene() and not (f and f:call("isAnyFadeOut"))
+    local fading = f and f:call("isAnyFadeOut") and t_now - (me.loaded_at or 0) < 30
+    local calm = me.go ~= nil and not in_cutscene() and not fading
     if calm then fresh.calm_since = fresh.calm_since or t_now else fresh.calm_since = nil end
     -- a co-op playthrough starts in the middle of the host's chapter: its opening cutscene is skipped
     -- (3 s into it: a skip right as it starts is taken but the cutscene plays on)
@@ -4463,6 +4514,254 @@ end
 -- dev
 fresh.read_kit, fresh.apply_kit, fresh.start_new_game, fresh.load_kit = read_kit, apply_kit, start_new_game, load_kit
 fresh.world_blob, fresh.start_world_load, fresh.hook_restores = world_blob, start_world_load, hook_restores
+end)()
+
+-------------------------------------------------------------------------------------------------
+-- sync check
+-------------------------------------------------------------------------------------------------
+-- What the two games share, compared (the test oracle the co-op playbook asks for: snapshots of
+-- shared state from both clients, diffed). Either player asks ("Check sync with partner" in the menu,
+-- and the guest by itself a minute after joining and every 5 minutes); the other answers with a
+-- digest of its world: story flows, every gimmick's logical fields, the items lying about, the
+-- enemies (spawned, dead, HP, where) and how its copy of us is doing. The asking side builds its own,
+-- compares, says the counts and writes the details to reframework/data/re9coop_sync_report.txt
+-- (the file to send when something looks wrong).
+;(function()
+local check = { next_auto = nil, waiting = nil, last = nil }
+ext.check = check
+
+local function round(v) return math.floor(v * 2 + 0.5) / 2 end
+
+-- our side, as plain data (inside the game's GUI update: gimmick states come from store())
+local function digest()
+    local d = { chapter = me.chapter, t = os.time(), flows = {}, gims = {}, items = {}, foes = {}, puppets = {} }
+    if me.go then
+        local p = me.go:call("get_Transform"):call("get_Position")
+        d.pos = { round(p.x), round(p.y), round(p.z) }
+    end
+    for hash, value in pairs(story.flows() or {}) do d.flows[tostring(hash)] = value end
+    for _, gc in ipairs(gim.contexts_of(now()) or {}) do
+        local id = gim.id_of(gc)
+        if id then
+            local ok, _, sig = pcall(gim.state_of, gc)
+            if ok and sig then d.gims[id] = sig end
+        end
+    end
+    world.refresh(now())
+    for id, core in pairs(world.items or {}) do
+        local ok, spawned = pcall(function() return core:get_field("_Context"):call("get_IsSpawn") end)
+        if ok then d.items[id] = spawned and 1 or 0 end
+    end
+    -- the game's own enemy list (the mod's index only fills while enemies are shared)
+    local cm = sdk.get_managed_singleton("app.CharacterManager")
+    local list = cm and cm:call("get_EnemyContextList")
+    local all = {}
+    for i = 0, (list and list:call("get_Count") or 0) - 1 do
+        local ctx = list:call("get_Item", i)
+        local okid, id = pcall(function() return ctx:call("get_ID"):call("ToString") end)
+        local okk, kind = pcall(function() return ctx:call("get_KindID"):call("ToString") end)
+        if okid and id then all[id] = { ctx = ctx, kind = okk and kind or "?" } end
+    end
+    for id, e in pairs(all) do
+        local f = { k = e.kind }
+        local ok = pcall(function()
+            f.s = e.ctx:call("get_IsSpawn") and 1 or 0
+            f.d = e.ctx:call("get_IsDead") and 1 or 0
+            local hp = e.ctx:call("get_HitPoint")
+            f.hp = hp and hp:call("get_CurrentHitPoint") or nil
+            local go = f.s == 1 and e.ctx:call("get_GameObject")
+            if go then
+                local p = go:call("get_Transform"):call("get_Position")
+                f.p = { round(p.x), round(p.y), round(p.z) }
+            end
+            f.o = foes.owner[id] == false and "partner" or "us"
+        end)
+        if ok then d.foes[id] = f end
+    end
+    -- how our copies of the other player(s) are doing (animations reach us?)
+    for pid, p in pairs(peers) do
+        if pid ~= LOOPBACK_ID then
+            local pup = p.puppet
+            local matched, total = 0, 0
+            for _, j in ipairs(pup and pup.jmap or {}) do
+                total = total + 1
+                if j then matched = matched + 1 end
+            end
+            local last = p.snaps[#p.snaps]
+            d.puppets[pid] = { name = p.name, state = pup and pup.state or "none", visible = pup and pup.visible or false,
+                joints = total, matched = matched, names = p.appear and #(p.appear.names or {}) or 0,
+                sent_joints = last and #last.j or 0, snaps = #p.snaps, age = string.format("%.1f", now() - (p.last or 0)),
+                chapter = p.chapter }
+        end
+    end
+    d.my_joints = me.joints and #me.joints or 0
+    return d
+end
+
+local function n_keys(t) local n = 0 for _ in pairs(t or {}) do n = n + 1 end return n end
+
+-- compare ours (a) with theirs (b): lines for the report and counts
+local function compare(a, b, who)
+    -- (an empty table comes back from JSON as nothing)
+    for _, k in ipairs({ "flows", "gims", "items", "foes", "puppets" }) do a[k], b[k] = a[k] or {}, b[k] or {} end
+    local out, counts = {}, { flows = 0, gims = 0, items = 0, foes = 0 }
+    local function line(s) out[#out + 1] = s end
+    line(string.format("sync check %s, us in %s, %s in %s", os.date("%Y-%m-%d %H:%M:%S"), tostring(a.chapter), who, tostring(b.chapter)))
+    if a.chapter ~= b.chapter then line("DIFFERENT CHAPTERS: the rest compares things that can't match") end
+    if a.pos and b.pos then line(string.format("positions: us %s, %s %s", table.concat(a.pos, ","), who, table.concat(b.pos, ","))) end
+    -- story
+    line("")
+    line(string.format("story flows: %d here, %d there", n_keys(a.flows), n_keys(b.flows)))
+    local fl = {}
+    for h, v in pairs(a.flows) do
+        local w = b.flows[h] or 0
+        if w ~= v then fl[#fl + 1] = string.format("  flow %s: here %d, there %d", h, v, w) end
+    end
+    for h, w in pairs(b.flows) do
+        if a.flows[h] == nil and w ~= 0 then fl[#fl + 1] = string.format("  flow %s: here 0, there %d", h, w) end
+    end
+    counts.flows = #fl
+    table.sort(fl)
+    for i = 1, math.min(#fl, 40) do line(fl[i]) end
+    -- gimmicks
+    line("")
+    line(string.format("gimmicks: %d here, %d there", n_keys(a.gims), n_keys(b.gims)))
+    local gl = {}
+    for id, sig in pairs(a.gims) do
+        local other = b.gims[id]
+        if other and other ~= sig then
+            local name = "?"
+            local gc = gim.by_id and gim.by_id[id]
+            local ok, entries = false, nil
+            if gc then
+                local okb, body = pcall(function() return gc:call("get_BodyGameObject") end)
+                if okb and body then name = body:call("get_Name") end
+                ok, entries = pcall(gim.state_of, gc)
+            end
+            local mine, theirs = {}, {}
+            for v in sig:gmatch("[^,]+") do mine[#mine + 1] = v end
+            for v in other:gmatch("[^,]+") do theirs[#theirs + 1] = v end
+            local diffs = {}
+            if #mine ~= #theirs then
+                diffs[1] = string.format("%d fields here, %d there", #mine, #theirs)
+            else
+                for i = 1, #mine do
+                    if mine[i] ~= theirs[i] then
+                        local e = ok and entries and entries[i]
+                        diffs[#diffs + 1] = string.format("%s=%s/%s", e and (e[1]:match("[^.]+$") .. "." .. e[2]) or ("#" .. i), mine[i], theirs[i])
+                    end
+                end
+            end
+            gl[#gl + 1] = string.format("  %s %s: %s", name, id:sub(1, 8), table.concat(diffs, " "))
+        end
+    end
+    counts.gims = #gl
+    table.sort(gl)
+    for i = 1, math.min(#gl, 60) do line(gl[i]) end
+    -- items lying about
+    line("")
+    local il = {}
+    for id, s in pairs(a.items) do
+        local t = b.items[id]
+        if t ~= nil and t ~= s then
+            il[#il + 1] = string.format("  item %s: %s here, %s there", id:sub(1, 8), s == 1 and "still lying" or "taken", t == 1 and "still lying" or "taken")
+        end
+    end
+    counts.items = #il
+    line(string.format("items: %d here, %d there, %d differ", n_keys(a.items), n_keys(b.items), #il))
+    for i = 1, math.min(#il, 40) do line(il[i]) end
+    -- enemies
+    line("")
+    local el = {}
+    for id, f in pairs(a.foes) do
+        local g = b.foes[id]
+        if g == nil then
+            if f.s == 1 and f.d == 0 then el[#el + 1] = string.format("  %s %s: alive here, not in %s's game", f.k, id:sub(1, 8), who) end
+        else
+            local why = {}
+            if f.d ~= g.d then why[#why + 1] = string.format("dead here %d there %d", f.d, g.d) end
+            if f.s ~= g.s then why[#why + 1] = string.format("spawned here %d there %d", f.s, g.s) end
+            if f.p and g.p then
+                local dx, dy, dz = f.p[1] - g.p[1], f.p[2] - g.p[2], f.p[3] - g.p[3]
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if dist > 3 then why[#why + 1] = string.format("%.0f m apart", dist) end
+            end
+            if f.hp and g.hp and f.d == 0 and math.abs(f.hp - g.hp) > 1 then why[#why + 1] = string.format("HP %d/%d", f.hp, g.hp) end
+            if #why > 0 then el[#el + 1] = string.format("  %s %s (run by %s): %s", f.k, id:sub(1, 8), f.o, table.concat(why, ", ")) end
+        end
+    end
+    for id, g in pairs(b.foes) do
+        if a.foes[id] == nil and g.s == 1 and g.d == 0 then el[#el + 1] = string.format("  %s %s: alive in %s's game, not here", g.k, id:sub(1, 8), who) end
+    end
+    counts.foes = #el
+    table.sort(el)
+    line(string.format("enemies: %d here, %d there, %d differ", n_keys(a.foes), n_keys(b.foes), #el))
+    for i = 1, math.min(#el, 60) do line(el[i]) end
+    -- the player copies
+    line("")
+    line(string.format("our player: %d joints; %s's: %s", a.my_joints or 0, who, tostring(b.my_joints)))
+    for side, d in pairs({ ["our copy of them"] = a, ["their copy of us"] = b }) do
+        for _, p in pairs(d.puppets or {}) do
+            line(string.format("%s (%s): %s, visible %s, joints matched %d of %d (names %d, a pose carries %d), %d poses kept, last %s s ago, in %s",
+                side, tostring(p.name), p.state, tostring(p.visible), p.matched, p.joints, p.names, p.sent_joints, p.snaps, p.age, tostring(p.chapter)))
+        end
+    end
+    return out, counts
+end
+
+local function request(why)
+    local p = partner_to_follow and partner_to_follow()
+    if p == nil or p.id == LOOPBACK_ID then return "no partner" end
+    check.waiting = { id = p.id, t = now(), why = why }
+    send_ctrl(string.pack("<B", MSG.CHECK_REQ), p.id)
+    return "asked " .. tostring(p.name)
+end
+check.request = request
+
+ext.check_ctrl = function(from, kind, data)
+    if kind == MSG.CHECK_REQ then
+        ext.later(function()
+            local ok, d = pcall(digest)
+            if ok then send_ctrl(string.pack("<Bs4", MSG.CHECK, json.dump_string(d)), from) end
+        end)
+    elseif kind == MSG.CHECK then
+        local w = check.waiting
+        if w == nil or w.id ~= from then return end
+        check.waiting = nil
+        local _, s = string.unpack("<Bs4", data)
+        ext.later(function()
+            local okj, theirs = pcall(json.load_string, s)
+            local okd, ours = pcall(digest)
+            if not (okj and okd and type(theirs) == "table") then say("sync check failed") return end
+            local p = peers[from]
+            local lines, c = compare(ours, theirs, p and p.name or "partner")
+            fs.write("re9coop_sync_report.txt", table.concat(lines, "\n"))
+            check.last = c
+            say("sync check (%s): %d story flows, %d gimmicks, %d items, %d enemies differ (re9coop_sync_report.txt)",
+                w.why, c.flows, c.gims, c.items, c.foes)
+        end)
+    end
+end
+
+-- the guest checks by itself: a minute after it's settled in, then every 5 minutes
+ext.check_late = function(t_now)
+    if check.waiting and t_now - check.waiting.t > 20 then check.waiting = nil end
+    local st = session.status
+    local p = partner_to_follow and partner_to_follow()
+    if not world_shared() or st == nil or st.is_host or p == nil or p.id == LOOPBACK_ID or p.chapter ~= me.chapter then
+        check.next_auto = nil
+        return
+    end
+    if ext.settled and not ext.settled() then return end
+    if check.next_auto == nil then check.next_auto = t_now + 60 end
+    if t_now >= check.next_auto and check.waiting == nil then
+        check.next_auto = t_now + 300
+        request("automatic")
+    end
+end
+
+-- dev
+check.digest, check.compare = digest, compare
 end)()
 
 -------------------------------------------------------------------------------------------------
@@ -5011,7 +5310,7 @@ end
 -- game's memory (a crash a second later, in its lock-on scan).
 local function scene_leaving()
     if me.go ~= nil then
-        me.leaving = { addr = me.go_addr, till = now() + 60 }
+        me.leaving = { addr = me.go_addr, till = now() + 60, joint = me.joints and me.joints[1] and me.joints[1]:get_address() or 0 }
         forget_player() -- on_player_lost: puppets destroyed, enemies / world / gimmicks / story / box reset
     end
     if ext.life then ext.life.hp, ext.life.hp_addr, ext.life.grab = nil, 0, nil end
@@ -5073,6 +5372,8 @@ re.on_application_entry("LateUpdateBehavior", function()
     if not ok then say("sync error: %s", tostring(err)) end
     ok, err = pcall(ext.fresh_late, t_now)
     if not ok then say("co-op playthrough error: %s", tostring(err)) end
+    ok, err = pcall(ext.check_late, t_now)
+    if not ok then say("sync check error: %s", tostring(err)) end
 end)
 
 re.on_frame(function()
@@ -5161,6 +5462,8 @@ re.on_draw_ui(function()
         if imgui.button("Teleport to partner") then say("%s", teleport_to_partner()) end
         imgui.same_line()
         if imgui.button("Go to partner's chapter") then say("%s", go_to_partner_chapter()) end
+        imgui.same_line()
+        if imgui.button("Check sync with partner") and ext.check then say("sync check: %s", ext.check.request("by hand")) end
         imgui.same_line()
         if imgui.button("Leave") then
             send_ctrl(string.pack("<B", MSG_BYE))

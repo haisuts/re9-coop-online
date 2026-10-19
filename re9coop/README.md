@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.11.0
+# RE9 Co-op (online) — v0.11.2
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -68,6 +68,11 @@ from it is used.
 - **Saving together**: the host saves as usual (autosaves, typewriter); each time, the mod also keeps
   what the guest carries. To go on later: the host loads their save and hosts, the guest joins from
   the main menu.
+- **Sync check**: "Check sync with partner" in the menu (and the guest's game by itself a minute after
+  joining, then every 5 minutes) compares the two games: story, every puzzle and lock, the items lying
+  about, the enemies (alive, HP, where) and how each game's copy of the other player is doing. The
+  counts show on screen and in the log; the details go to `reframework/data/re9coop_sync_report.txt`.
+  When something looks wrong, send that file from both games.
 - **Teleport to partner**, partner health in the name tag, public lobbies and a "Copy lobby ID" button.
 
 **Not shared:** what you carry (each keeps their own inventory; the guest's is kept by the mod).
@@ -156,6 +161,11 @@ Both players need the same mod version. Steam has to be running (the game needs 
   смешиваются).
 - **Совместное сохранение:** хост сохраняется как обычно (автосейвы, печатная машинка); каждый раз мод
   заодно сохраняет вещи гостя.
+- **Проверка синхронизации:** кнопка «Check sync with partner» в меню мода (а у гостя сама — через минуту
+  после входа и потом каждые 5 минут) сравнивает две игры: сюжет, все загадки и замки, лежащие
+  предметы, врагов (жив ли, здоровье, где стоит) и то, как каждая игра показывает другого игрока. Итог
+  виден на экране и в логе, подробности — в файле `reframework/data/re9coop_sync_report.txt`. Если
+  что-то не так — пришлите этот файл с обеих сторон.
 - **Чёрный экран после перехода:** если после перехода в главу, начала совместного прохождения или
   пропуска катсцены напарником экран остаётся чёрным дольше 20 секунд, мод снимает затемнение сам.
 
@@ -249,6 +259,13 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   Leon in Chap3_20 loaded as the host's Chap3_02 with Grace, at the host's spot (within 0.1 m), moving
   after the game's own fade-in; a "Load" inside the co-op playthrough brought the host's world back.
   Packed and unpacked again, the world matched itself field for field.
+- v0.11.1: the sync check: our digest against itself 0 differences; a mutation twin (one story flow, one
+  gimmick field, one item, one enemy changed) showed exactly those four; a request answered through the
+  net plugin's loopback, report written (637 flows, 684 gimmicks, 155 items, 40 enemies in Chap3_02).
+- v0.11.2: as the host, a guest's message that locks an open lock again was refused (the lock stayed
+  open), the same message from the host still locked it on the guest; a guest's story step back was
+  refused (the flow stayed); the sync check again 0 differences against itself and exactly the 4 planted
+  ones in its mutation twin.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
