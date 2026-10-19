@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.11.3
+# RE9 Co-op (online) — v0.12.0
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -11,6 +11,11 @@ from it is used.
 - **Shared enemies**: each enemy is run by the player it's closest to, so enemies hunt, grab and hurt
   both of you. The other player sees the same enemy pose for pose; their hits on it count, and an enemy
   killed by one player is dead in the other's game too.
+- **Your partner's sounds**: their footsteps (on whatever floor they walk on), clothes, breathing and
+  hands come from their character in your game, besides their gun.
+- **Switches and breakables the game's way**: a light switch your partner flips or a crate they break
+  switches and breaks in your game too, with its own animation, debris and sound (other puzzles and
+  locks still jump to the partner's state).
 - **Shared doors and pickups**: a door your partner pushes open opens in your game too; an item your
   partner picks up disappears from yours. A door you opened before that won't move any more (a
   session with an older version could leave doors held by a scene that never plays in your game):
@@ -99,6 +104,11 @@ Both players need the same mod version. Steam has to be running (the game needs 
   вспышками выстрелов, звуками оружия, фонариком; над головой ник, здоровье в % и пинг.
 - **Враги:** каждым врагом управляет тот, к кому он ближе, — враги нападают на обоих; попадания
   обоих засчитываются; второй игрок видит того же врага движение в движение.
+- **Звуки напарника:** его шаги (по тому полу, по которому он идёт), одежда, дыхание и руки звучат у
+  вашей копии напарника, а не только его оружие.
+- **Выключатели и ломаемые предметы:** выключатель, который щёлкнул напарник, и ящик, который он
+  разбил, переключаются и ломаются и у вас — со своей анимацией, обломками и звуком (остальные загадки
+  и замки по-прежнему просто встают в состояние напарника).
 - **Двери:** толкнули дверь — она открывается и у напарника. Если дверь, которую вы уже открывали,
   больше не двигается (после сессии со старой версией двери могли остаться «удержанными» сценкой,
   которая в вашей игре не идёт), в меню мода появится кнопка «Free stuck doors»: нажмите её у хоста
@@ -275,6 +285,12 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   mode); the button's steps, done by hand, let all four go, the three opened before unlocked again, the
   fourth (never opened) stayed a locked door; the security office door then swung open when pushed (to
   90 degrees). The button's own code, run in that game, found a door held again by hand and let it go.
+- v0.12.0: our own body's sounds replayed on the echo while walking: 11 to 22 sounds a walk reached the
+  echo and played (the player's sound container playing up to 7 at once against 5 without them, and
+  the recording shows a second step after each of ours); the echo destroyed while 7 of its sounds
+  played, no crash. Interactions: 49 replayable triggers indexed in Chap3_02 (7 switch on, 7 off, 35
+  crates); a partner's switch-on from our own state replayed (the switch changed), the same from
+  another state skipped; our own switch-off sent with its earlier state.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works

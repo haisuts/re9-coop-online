@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.11.3"
-local PROTO = 11
+local VERSION = "0.12.0"
+local PROTO = 12
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -35,6 +35,7 @@ local cfg = {
     loopback_face = true,     -- self test: the echo faces you (mirror) instead of copying your heading
     loopback_delay_ms = 150,  -- self test: simulated one-way latency
     shot_fx = true,           -- partner's muzzle flash light and gun sounds
+    body_sounds = true,       -- partner's footsteps, clothes, breathing: the sounds of their body
     flash_power = 2000,       -- muzzle flash light (the game's own flashlight fill light is 100)
     flash_radius = 5.0,
     enemy_sync = true,        -- share the host's enemies
@@ -209,7 +210,7 @@ local me = {
     chapter = "", kind = "",
     appear = nil, appear_blob = nil, appear_key = "", next_appear_check = 0,
     weapon_blob = nil, next_weapon_check = 0,
-    weapon_go_addr = 0, weapon_sc = nil, player_sc = nil,
+    weapon_go_addr = 0, weapon_sc = nil, player_sc = nil, sc_addr = 0,
     flashlight = nil,      -- app.FlashLightController under "PlayerFlashLightController"
 }
 
@@ -221,6 +222,7 @@ local function forget_player()
     me.pc, me.go, me.go_addr = nil, nil, 0
     me.joints, me.names, me.j_root, me.j_hip = nil, nil, nil, nil
     me.weapon_go_addr, me.weapon_sc, me.player_sc, me.flashlight = 0, nil, nil, nil
+    me.sc_addr = 0
     me.chapter, me.kind = "", ""
 end
 
@@ -324,6 +326,7 @@ local function refresh_player()
         me.next_appear_check = 0
         me.weapon_blob, me.next_weapon_check = nil, 0
         me.player_sc = go:call("getComponent(System.Type)", TYPE_SOUND)
+        me.sc_addr = me.player_sc and me.player_sc:get_address() or 0
         local c = go:call("get_Transform"):call("get_Child")
         while c do
             local cgo = c:call("get_GameObject")
@@ -349,7 +352,8 @@ local MSG_DOOR, MSG_ITEM_TAKEN = 17, 18
 local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
-    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36, CHECK_REQ = 37, CHECK = 38 }
+    CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36, CHECK_REQ = 37, CHECK = 38,
+    BODY_SOUND = 39 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 local CH_CTRL, CH_POSE, CH_ENEMY = 0, 1, 2
@@ -842,6 +846,31 @@ sdk.hook(M_SND_FULL, function(args)
     end
 end, nil)
 
+-- The sounds of our body: footsteps (on whatever floor is underfoot), clothes, breathing, hands. Our
+-- player's own sound container starts them with our player as the source object; they're caught as
+-- they start (every sound in the game passes here: the container is compared first, as a raw pointer).
+sdk.hook(sdk.find_type_definition("soundlib.SoundContainer"):get_method(
+    "onPostRequestInfoStart(soundlib.SoundManager.RequestInfo)"), function(args)
+    if me.sc_addr == 0 or sdk.to_int64(args[2]) ~= me.sc_addr or #fx_out >= 32 or not cfg.body_sounds then return end
+    local ri = sdk.to_managed_object(args[3])
+    local src = ri and ri:get_field("<SrcGameObj>k__BackingField")
+    if src == nil or src:get_address() ~= me.go_addr then return end
+    local id = ri:get_field("_TriggerId")
+    if id then fx_out[#fx_out + 1] = string.pack("<BI4", MSG.BODY_SOUND, id & 0xFFFFFFFF) end
+end, nil)
+
+-- Played through our own player's sound container (the same character: the same trigger list) with the
+-- partner's copy as the source object, the way the game starts our own: the trigger's joint (a foot, a
+-- hand) is found on the copy's skeleton and the container picks the floor material and our status
+-- switches itself. A character other than ours may have triggers we don't know: those are silent.
+me.play_body_sound = function(p, id)
+    local pup = p.puppet
+    if not cfg.body_sounds or pup == nil or pup.state ~= "ready" or not pup.visible or me.player_sc == nil then return end
+    fx_replaying = true
+    pcall(M_SND_FULL.call, M_SND_FULL, me.player_sc, id, pup.root, nil, 0xFFFFFFFF, false, 0, 1, nil, nil, nil, nil)
+    fx_replaying = false
+end
+
 -- Played through our own gun's sound container (it has the gun sound banks loaded), placed at the
 -- partner's hand. A gun we don't carry may have no bank loaded here; then it's silent.
 local function play_partner_sound(p, id)
@@ -907,6 +936,9 @@ local function on_ctrl(from, data)
     elseif kind == MSG_SOUND then
         local _, id = string.unpack("<BI4", data)
         play_partner_sound(p, id)
+    elseif kind == MSG.BODY_SOUND then
+        local _, id = string.unpack("<BI4", data)
+        me.play_body_sound(p, id)
     elseif kind == MSG_REQ_APPEAR then
         if from ~= LOOPBACK_ID then announce(from) end
     elseif kind == MSG_PING then
@@ -2242,6 +2274,59 @@ local TYPE_CORE = sdk.typeof("app.GimmickCore")
 local M_TRIGGER_PROCESS = sdk.find_type_definition("app.InteractTrigger"):get_method("onProcessEvent(via.GameObject)")
 local SIG_TRIGGER_PROCESS = "onProcessEvent(via.GameObject)"
 
+-- A partner's own interaction with a gimmick that moves only itself (no scene, camera, inventory or
+-- action of the player): replayed on our copy, so it switches, breaks and sounds here the game's way
+-- instead of jumping to the partner's data. Checked in game: a light switch's InteractOn and a crate's
+-- Broken change only the gimmick (its data, its debris) and leave our player alone. Never on anything
+-- with a player action (a situation, an item used, a file, a lock, a door, a ladder, a puzzle of its
+-- own class) or on the collectibles each player breaks for themselves. A drawer's Interact isn't
+-- either: replayed, it changed its data but didn't open (the player's hand opens it).
+gim.interaction = {
+    -- trigger -> the part a gimmick must have for it
+    names = { InteractOn = "app.GmStructureDataSwitcher", InteractOff = "app.GmStructureDataSwitcher", Broken = "app.GmDurabilityV2" },
+    unsafe = {
+        ["app.GmSituationInteractable"] = true, ["app.GmLockV2"] = true, ["app.GmDoorV3"] = true,
+        ["app.GmDoubleDoorV3"] = true, ["app.GmSlideDoorV2"] = true, ["app.GmDoorCrash"] = true,
+        ["app.GmItemBoxV2"] = true, ["app.GmTypewriterV3"] = true, ["app.GmFileV2"] = true,
+        ["app.GmDetailSearch"] = true, ["app.GmUseKeyItemV3"] = true, ["app.GmLadderV2"] = true,
+        ["app.GmJackActionV2"] = true, ["app.GmFragileSymbol"] = true, ["app.GmSafe"] = true,
+        ["app.GmContainer"] = true, ["app.GmMultipleUseKeyItem"] = true, ["app.GmMultipleUseKeyItemTarget"] = true,
+        ["app.GmWristTagAuthenticator"] = true, ["app.GmCRControl"] = true, ["app.GmTimer"] = true,
+        ["app.GmBulldozerBreakObject"] = true, ["app.GmBulldozerBreakObjectController"] = true,
+        ["app.GmStorageV2"] = true,
+    },
+}
+-- the interaction triggers of a gimmick that may be replayed ({name = true}), or nil
+gim.interaction_names = function(body)
+    local parts, unsafe = {}, false
+    local function scan(go)
+        local okc, comps = pcall(function() return go:call("get_Components"):get_elements() end)
+        for _, c in ipairs(okc and comps or {}) do
+            local tn = c:get_type_definition():get_full_name()
+            if tn:find("^app%.Gm") then
+                parts[tn] = true
+                -- a class of its own (Gm02_032, Gm99_108...): a puzzle with its own scene
+                if gim.interaction.unsafe[tn] or tn:find("^app%.Gm%d") then unsafe = true end
+            end
+        end
+    end
+    scan(body)
+    local ch = body:call("get_Transform"):call("get_Child")
+    while ch and not unsafe do
+        scan(ch:call("get_GameObject"))
+        ch = ch:call("get_Next")
+    end
+    if unsafe then return nil end
+    local want
+    for name, part in pairs(gim.interaction.names) do
+        if parts[part] then
+            want = want or {}
+            want[name] = true
+        end
+    end
+    return want
+end
+
 -- the replayable triggers here, by address and by "context id|name"
 local function trigger_index(t_now, force)
     local ti = gim.triggers
@@ -2254,9 +2339,10 @@ local function trigger_index(t_now, force)
     ti.t, ti.chapter, ti.by_addr, ti.by_key = t_now + 30, me.chapter, {}, {}
     ti.names = ti.names or {} -- every name replayed so far (a miss on one of these rebuilds the index)
     -- the triggers on `go` (every holder on it) whose names pass `want`
-    local function add(go, want)
-        local core = go and go:call("getComponent(System.Type)", TYPE_CORE)
-        local ok, id = pcall(function() return core:call("get_ContextID"):call("ToString") end)
+    local function add(go, want, ctx_id, interaction)
+        local core = go and not ctx_id and go:call("getComponent(System.Type)", TYPE_CORE)
+        local ok, id = true, ctx_id
+        if not ctx_id then ok, id = pcall(function() return core:call("get_ContextID"):call("ToString") end) end
         -- right after a load the gimmicks' IDs aren't assigned yet (all zeros): index them later
         if not ok or not id or id:find("^00000000%-0000") then return end
         local lock = go:call("getComponent(System.Type)", TYPE_LOCK)
@@ -2267,8 +2353,8 @@ local function trigger_index(t_now, force)
             for _, t in ipairs(okt and trs or {}) do
                 local name = t:get_field("_Name")
                 if want(name) then
-                    ti.by_addr[t:get_address()] = { id = id, name = name }
-                    ti.by_key[id .. "|" .. name] = { trig = t, go = go, lock = lock }
+                    ti.by_addr[t:get_address()] = { id = id, name = name, interaction = interaction }
+                    ti.by_key[id .. "|" .. name] = { trig = t, go = go, lock = lock, interaction = interaction }
                     ti.names[name] = true
                 end
             end
@@ -2291,6 +2377,21 @@ local function trigger_index(t_now, force)
             if n and n ~= "" and n ~= "Interact" then names[n] = true end
         end
         if next(names) then add(lock:call("get_GameObject"), function(n) return names[n] == true end) end
+    end
+    -- interactions that move only the gimmick (its body and the parts right under it)
+    for _, gc in ipairs(gimmick_contexts(t_now)) do
+        local okb, body = pcall(gc.call, gc, "get_BodyGameObject")
+        local oki, want = pcall(function() return body and gim.interaction_names(body) end)
+        local id = okb and oki and want and context_id(gc)
+        if id then
+            local function is_wanted(n) return want[n] == true end
+            add(body, is_wanted, id, true)
+            local ch = body:call("get_Transform"):call("get_Child")
+            while ch do
+                add(ch:call("get_GameObject"), is_wanted, id, true)
+                ch = ch:call("get_Next")
+            end
+        end
     end
     return ti
 end
@@ -2318,8 +2419,16 @@ sdk.hook(M_TRIGGER_PROCESS, function(args)
     local key = e.id .. "|" .. e.name
     if t_now - (gim.applied_at[e.id] or -10) < 5 or t_now - (gim.trig_sent[key] or -10) < 10 then return end
     gim.trig_sent[key] = t_now
+    -- an interaction carries the gimmick's state before it: the partner replays it only from the same
+    -- state (where the result came first, the data has done it already)
+    local before = ""
+    if e.interaction then
+        local ok, _, sig = pcall(gimmick_state, gim.by_id and gim.by_id[e.id])
+        if not ok then return end
+        before = sig
+    end
     if #gim.out < 64 then
-        gim.out[#gim.out + 1] = string.pack("<Bs1s1s1", MSG.GIMMICK_TRIGGER, me.chapter, e.id, e.name)
+        gim.out[#gim.out + 1] = string.pack("<Bs1s1s1s2", MSG.GIMMICK_TRIGGER, me.chapter, e.id, e.name, before)
         gim.stats.live_sent = gim.stats.live_sent + 1
     end
 end, nil)
@@ -2332,13 +2441,21 @@ local function lock_open(lock)
 end
 
 local function apply_trigger(data)
-    local _, chapter, id, name = string.unpack("<Bs1s1s1", data)
+    local _, chapter, id, name, pos = string.unpack("<Bs1s1s1", data)
     if chapter ~= me.chapter then return end
+    local before = #data >= pos + 1 and string.unpack("<s2", data, pos) or nil
     local key = id .. "|" .. name
     local t_now = now()
     local e = trigger_index(t_now).by_key[key] or trigger_index(t_now, true).by_key[key]
     if e == nil then return "missing" end -- not indexed (yet), or not loaded here
     if e.lock and lock_open(e.lock) then return end
+    if e.interaction then
+        local ok, _, sig = pcall(gimmick_state, gim.by_id and gim.by_id[id])
+        if not ok or before == nil or before == "" or sig ~= before then
+            gim.stats.interact_skipped = (gim.stats.interact_skipped or 0) + 1
+            return
+        end
+    end
     -- the partner's data has counted this unlock already, and the lock counts it again when the trigger
     -- fires (on its next update): one off first, so it lands on the partner's count (a lock that wants
     -- two keys must not open on one)
@@ -2365,6 +2482,7 @@ local function apply_trigger(data)
     gim.trigger_applying = false
     gim.applied_at[id] = now()
     gim.stats.live_applied = gim.stats.live_applied + 1
+    if e.interaction then gim.stats.interact_applied = (gim.stats.interact_applied or 0) + 1 end
 end
 
 -- the lobby owner sends every gimmick once when a partner shows up in the same chapter
@@ -5621,6 +5739,7 @@ re.on_draw_ui(function()
     local changed = false
     c, v = imgui.checkbox("Self test: echo faces you", cfg.loopback_face); if c then cfg.loopback_face, changed = v, true end
     c, v = imgui.checkbox("Partner's muzzle flash and gun sounds", cfg.shot_fx); if c then cfg.shot_fx, changed = v, true end
+    c, v = imgui.checkbox("Partner's footsteps and body sounds", cfg.body_sounds); if c then cfg.body_sounds, changed = v, true end
     c, v = imgui.checkbox("Share enemies (both players need it on)", cfg.enemy_sync); if c then cfg.enemy_sync, changed = v, true end
     c, v = imgui.checkbox("Share doors and pickups", cfg.world_sync); if c then cfg.world_sync, changed = v, true end
     c, v = imgui.checkbox("Share locks, puzzles and switches", cfg.gimmick_sync); if c then cfg.gimmick_sync, changed = v, true end

@@ -763,6 +763,41 @@ The host still couldn't open the security office door of Chap3_02 (the save from
   game runs with DLSS frame generation (2x); the mod draws nothing in solo play. Unknown yet whether
   frame generation alone causes it, or with REFramework, or something else.
 
+## v0.12.0 (2026-10-19) — the partner's body sounds; switches and crates the game's way
+
+Asked for: everything that can be shared, shared (animation, sound, doors, enemies, bosses, loot).
+This version adds what could be built and checked on one PC; see "Next steps" for the rest.
+
+- Body sounds: every sound our player's own sound container starts with our player as the source
+  (soundlib.SoundContainer.onPostRequestInfoStart, compared as raw pointers first: every sound in the
+  game passes there) goes to the partner as its trigger id (MSG.BODY_SOUND). The partner's game starts
+  it through its own player's container with the puppet as the source object
+  (trigger(UInt32, GameObject, GameObject, ...), the way the game starts ours): the trigger's joint
+  offset resolves on the puppet's skeleton, and the container picks the floor material
+  (setMaterialSwitch) and status switches itself. The same character on both sides, so the same trigger
+  list; a trigger we don't know is silent. Found on the way: four sdk.hook calls on
+  SoundManager.postRequestInfo stopped every one of them firing for the rest of the session.
+- Checked with the echo: sounds reached it and played (playing count of our container up to 7 with
+  them, 5 without; the 4 s recording has a second step after each of ours); the echo destroyed while 7
+  of its sounds played: no crash. Audibility at a distance is not measured (the room's ambience is as
+  loud as a step at 3 m).
+- Interactions: InteractTrigger.onProcessEvent of a gimmick that moves only itself is replayed on the
+  partner's copy: light switches (InteractOn / InteractOff on GmStructureDataSwitcher) and crates
+  (Broken on GmDurabilityV2), so they switch, break, drop debris and sound there the game's way. Not on
+  anything with a player action or a scene: situations, item use, files, locks, doors, ladders, jack
+  actions, the item box, the typewriter, safes, timers, puzzles with a class of their own (app.Gm<nn>_...),
+  storages (a drawer's Interact, replayed, changed its data but didn't open: the player's hand opens
+  it), and not on collectibles (GmFragileSymbol). The message carries the gimmick's state before the
+  interaction; the receiver replays it only from that same state (if the data came first, it's done).
+- Checked: 49 replayable triggers in Chap3_02 (7 + 7 switches, 35 crates); a switch-on sent from our own
+  state replayed (the switch's data moved as by hand, our player untouched), the same from another state
+  skipped; a switch-off fired here sent with its earlier state. A crate's Broken replayed broke it (its
+  data, one debris object more, no second item drop); its look not seen (behind a wall).
+- Enemies (the "different places" report): the arbiter sends every owner every 5 s besides the changes,
+  so an enemy both games ran at its spawn is settled within 5 s; the divergence reported came from a
+  0.10 session (the guest's world was its own new game). The sync check reports enemy positions.
+- PROTO 12.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
