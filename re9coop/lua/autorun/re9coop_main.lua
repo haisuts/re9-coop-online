@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.3"
+local VERSION = "0.12.4"
 local PROTO = 13
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -1372,18 +1372,28 @@ local function send_owners(changes)
 end
 
 -- Who should run an enemy (true = the arbiter, false = the other player). cur: current owner or nil.
--- boss: it keeps its owner for the whole fight (a handover restarts its AI, which breaks its phases);
--- it only moves when the owner's copy is gone (here / there: spawned on the arbiter's / other side).
+-- An enemy goes for the player whose game runs it. One player down and the other not (me_down /
+-- peer_down: the arbiter's player, the other one): the one standing runs it, or it would stay over a
+-- player it can't hurt while the other fights it untouched.
+-- boss: otherwise it keeps its owner for the whole fight (a handover restarts its AI, which breaks its
+-- phases); it moves when the owner's copy is gone (here / there: spawned on the arbiter's / other
+-- side), or when its owner has left it (BOSS_LEFT m off) with the other player at it (BOSS_NEAR m).
 -- Pure, so tools/test_owner_decision.lua can check it outside the game.
-local function owner_decision(cur, together, dead, dme, dpeer, boss, here, there)
+local function owner_decision(cur, together, dead, dme, dpeer, boss, here, there, me_down, peer_down)
     if not together then return true end
     if dead then
         if cur == nil then return true end
         return cur
     end
+    -- (only to a game that has it spawned: given to the other player's game without one, nobody ran
+    -- a boss whose arena wasn't loaded there)
+    if me_down and not peer_down and there then return false end
+    if peer_down and not me_down and here then return true end
     if boss and cur ~= nil then
         if cur and not here and there then return false end
         if not cur and here and not there then return true end
+        if cur and dme > 20 and dpeer < 8 then return false end -- BOSS_LEFT, BOSS_NEAR
+        if not cur and dpeer > 20 and dme < 8 then return true end
         return cur
     end
     if cur == nil then return dme <= dpeer end
@@ -1407,7 +1417,7 @@ local function arbitrate(t_now)
         local pr = foes.presence[id]
         local there = pr ~= nil and t_now - pr.t < 1.5
         local want = owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0,
-            foes.bosses[kind] == true, here, there)
+            foes.bosses[kind] == true, here, there, me.down == true, p ~= nil and (p.flags or 0) & FLAG_DOWN ~= 0)
         if want ~= cur then
             set_owner(id, want)
             changes[#changes + 1] = { id, not want } -- sent from the guest's point of view

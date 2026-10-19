@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.3
+# RE9 Co-op (online) — v0.12.4
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -316,6 +316,8 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
 - v0.12.3 on the stand: the host walked into a door (-60 degrees), the guest's copy followed (-41 when
   read) and both closed together; a drawer pulled out 0.3 m in the host's game came out in the guest's
   (the guest 1.6 m from it) and was still out 8 s later.
+- v0.12.4 on the stand, the C100 boss (spawned at its arena in both games): it went for the host and
+  put them down, then moved to the guest's game and went for the guest.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
@@ -383,7 +385,8 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   each player's own.
 - The hanging lamps in Chap3_01 (lights the stalker reacts to) can go out in one game and stay lit
   in the other; their light switch is shared.
-- A boss (and any enemy) attacks only the player who runs it; the other player can't be hurt by it.
+- An enemy attacks the player whose game runs it: the nearer one; a boss the one it started with,
+  until that player is down or has left it (20 m off, the other one within 8 m), then the other.
 - Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
   the first through the network code). The first real two-PC session may still find problems — please

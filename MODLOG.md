@@ -881,6 +881,19 @@ way round; drawers and cabinets open without their movement.
   A real hand-opened drawer is not filmed yet (the interact key took the pencil on the desk instead).
 - PROTO 13.
 
+## v0.12.4 (2026-10-19) — enemies and bosses go for the player still standing
+
+- owner_decision: one player down and the other not, the one standing runs the enemy (bosses too),
+  provided their game has it spawned (here / there): given to a game without one, nobody ran a boss
+  whose arena wasn't loaded there. A boss also moves when its runner has left it (20 m off) with the
+  other player at it (8 m). Before, a boss stayed with its runner for the whole fight: down
+  (invincible) or gone, it ignored the other player. tools/test_owner_decision.lua: 28 cases.
+- Checked on the stand with C100 (the Chap3_02 boss: its arena folder 院長室前まわり activated,
+  Cp_C100SpawnParam permitSpawn + requestSpawn in both games, as its entrance would): the host's game
+  ran it and it put the host down; it went to the guest's game at once and went for the guest. Without
+  its arena and spawn in the guest's game (the guest's story behind), the guest never had a copy and
+  the boss stayed with the downed host.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
