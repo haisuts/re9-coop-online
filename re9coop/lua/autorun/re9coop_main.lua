@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.4"
+local VERSION = "0.12.5"
 local PROTO = 13
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -414,6 +414,8 @@ local function local_flags()
     if me.pc:call("get_IsFPSCharacter") then f = f | 16 end
     if in_cutscene and in_cutscene() then f = f | FLAG_CUTSCENE end
     if me.down then f = f | FLAG_DOWN end
+    -- 1024: dead (on the game over screen until "Continue"): for the partner, as good as down
+    if me.dead then f = f | 1024 end
     if me.grabbed then f = f | FLAG_GRABBED end
     if me.falling then f = f | 512 end -- off the ground
     local fc = me.flashlight
@@ -1417,7 +1419,8 @@ local function arbitrate(t_now)
         local pr = foes.presence[id]
         local there = pr ~= nil and t_now - pr.t < 1.5
         local want = owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0,
-            foes.bosses[kind] == true, here, there, me.down == true, p ~= nil and (p.flags or 0) & FLAG_DOWN ~= 0)
+            foes.bosses[kind] == true, here, there, me.down == true or me.dead == true,
+            p ~= nil and (p.flags or 0) & (FLAG_DOWN | 1024) ~= 0)
         if want ~= cur then
             set_owner(id, want)
             changes[#changes + 1] = { id, not want } -- sent from the guest's point of view
@@ -1585,17 +1588,26 @@ local function enemies_tick(t_now)
         local e = foes.index[id]
         local fresh = t_now - st.last < 1.0 and st.chapter == me.chapter
         -- the owner's enemy died: ours dies too (its AI back, lethal damage the game's own way), so
-        -- this game counts it as dead and plays the death itself
-        if e and foes.owner[id] == false and st.flags & F_DEAD ~= 0 and not st.killed then
-            st.killed = true
+        -- this game counts it as dead and plays the death itself. A boss keeps its own no-death on
+        -- until its last phase, and our copy never got there (the hit left it standing at 1 HP, its AI
+        -- back): cleared in the same frame as the hit, and again until it is down
+        if e and foes.owner[id] == false and st.flags & F_DEAD ~= 0 and not st.killed and t_now >= (st.kill_t or 0) then
+            st.kill_tries, st.kill_t = (st.kill_tries or 0) + 1, t_now + 0.5
             if foes.puppets[id] then release_puppet(id, true) end
             if e.ctx:call("get_IsSpawn") and not e.ctx:call("get_IsDead") then
                 -- what it drops comes from the owner's game (see "enemy drops")
                 if cfg.share_drops then pcall(e.ctx.set_field, e.ctx, "<IsPermitedItemDropnOnDead>k__BackingField", false) end
                 local hp = e.ctx:call("get_HitPoint")
+                if hp then
+                    pcall(function()
+                        hp:get_field("<NoDeath>k__BackingField"):call("applyRequestHashSet(System.UInt32[])", sdk.create_managed_array("System.UInt32", 0))
+                    end)
+                    pcall(hp.call, hp, "set_Invincible", false)
+                end
                 local cur = hp and hp:call("get_CurrentHitPoint") or 0
                 apply_damage(e, 0, math.max(1, cur) + 100, false, true)
             end
+            if st.kill_tries >= 8 or e.ctx:call("get_IsDead") or not e.ctx:call("get_IsSpawn") then st.killed = true end
         end
         if e and foes.owner[id] == false and not st.killed then
             local pup = foes.puppets[id]
@@ -1610,7 +1622,11 @@ local function enemies_tick(t_now)
                     st.next_spawn = t_now + 1.5
                     st.tries = (st.tries or 0) + 1
                     local ctl = spawn_control(e)
-                    if ctl then ctl_request(ctl, st.tries % 2 == 1 and "requestSpawn" or "requestResume") end
+                    if ctl then
+                        ctl_request(ctl, st.tries % 2 == 1 and "requestSpawn" or "requestResume")
+                    elseif ext.spawn_by_param then
+                        ext.spawn_by_param(id, e, st)
+                    end
                 end
             elseif not fresh and (pup or spawned) then
                 local ctl = spawn_control(e)
@@ -1830,6 +1846,40 @@ end
 
 world.scene_components = scene_components
 world.refresh = function(t) return refresh_world(t) end
+
+-- An enemy the owner has up that has no spawn control here yet (a boss before its entrance: C100
+-- comes in at its arena through one of its spawn params): through the spawn param of its kind that
+-- manages it, the one nearest to where the owner has it.
+ext.spawn_by_param = function(id, e, st)
+    local kind = e.kind or ""
+    local td = kind:sub(1, 3) == "cp_" and sdk.find_type_definition("app.Cp_" .. kind:sub(4) .. "SpawnParam")
+    if not td then return end
+    local s = st.snaps and st.snaps[#st.snaps]
+    -- the params of a kind, looked up once per 3 s (several of its enemies may be waiting)
+    ext.param_cache = ext.param_cache or {}
+    local c = ext.param_cache[kind]
+    local t = now()
+    if c == nil or t > c.t or c.chapter ~= me.chapter then -- never objects of a chapter left behind
+        c = { t = t + 3, chapter = me.chapter, list = scene_components(td:get_runtime_type()) }
+        ext.param_cache[kind] = c
+    end
+    local best, best_d
+    for _, prm in ipairs(c.list) do
+        local ok, mid = pcall(function() return prm:call("get_ManagedContextID"):call("ToString") end)
+        if ok and mid == id then
+            local d = 0
+            if s and s.pos then
+                local okp, pp = pcall(function() return prm:call("get_GameObject"):call("get_Transform"):call("get_Position") end)
+                d = okp and (pp - s.pos):length() or 1e9
+            end
+            if best == nil or d < best_d then best, best_d = prm, d end
+        end
+    end
+    if best then
+        pcall(best.call, best, "permitSpawn(System.Boolean)", true)
+        if pcall(best.call, best, "requestSpawn") then foes.stats.param_spawns = (foes.stats.param_spawns or 0) + 1 end
+    end
+end
 
 world_shared = function()
     if me.go == nil or not cfg.world_sync then return false end
@@ -5557,7 +5607,7 @@ end
 
 -- die the game's way (game over)
 local function die()
-    life.down_since, me.down, life.dead = nil, false, true
+    life.down_since, me.down, life.dead, me.dead = nil, false, true, true
     set_nodeath(false)
     local hp = life.hp
     pcall(hp.call, hp, "set_Invincible", false)
@@ -5624,12 +5674,12 @@ ext.life_tick = function(t_now)
     local hp = me.pc and me.pc:call("get_HitPoint")
     local addr = hp and hp:get_address() or 0
     if addr ~= life.hp_addr then -- a new player object (load, chapter, game over)
-        life.hp, life.hp_addr, life.nodeath, life.dead = hp, addr, false, false
+        life.hp, life.hp_addr, life.nodeath, life.dead, me.dead = hp, addr, false, false, false
         life.down_since, life.grab, life.end_grab, me.down, me.grabbed = nil, nil, false, false, false
     end
     if hp == nil or life.dead then return end
     if hp:call("get_IsDead") or (life.down_since == nil and (hp:call("get_CurrentHitPoint") or 0) <= 0) then
-        life.dead, me.down = true, false -- died some other way (a fall, a scripted death)
+        life.dead, me.down, me.dead = true, false, true -- died some other way (a fall, a scripted death)
         set_nodeath(false)
         return
     end
@@ -5649,12 +5699,12 @@ ext.life_tick = function(t_now)
         local unit = core and core:get_field("<Unit>k__BackingField")
         if unit then pcall(unit.call, unit, "requestRestrictionAction", RESTRICT_DOWN) end
         if p then life.alone_since = nil else life.alone_since = life.alone_since or t_now end
-        if p and p.flags and p.flags & FLAG_DOWN ~= 0 then
+        if p and p.flags and p.flags & (FLAG_DOWN | 1024) ~= 0 then -- down or dead: nobody to get us up
             life.both_since = life.both_since or t_now
         else
             life.both_since = nil
         end
-        local partner_up = p and not (p.flags and p.flags & FLAG_DOWN ~= 0)
+        local partner_up = p and not (p.flags and p.flags & (FLAG_DOWN | 1024) ~= 0)
         if cfg.respawn_at_partner and partner_up and t_now - life.down_since > life.come_to_after then
             life.come_to(t_now)
         elseif t_now - life.down_since > BLEED_OUT or (life.alone_since and t_now - life.alone_since > PARTNER_GONE)
@@ -5719,6 +5769,9 @@ ext.life_draw = function()
         elseif p.flags and p.flags & FLAG_GRABBED ~= 0 then
             local msg = string.format("%s is grabbed: shoot the enemy or hit it next to them", p.name)
             if sp then draw.text(msg, sp.x - #msg * 3.5, sp.y, 0xFF40A0FF) end
+        elseif p.flags and p.flags & 1024 ~= 0 then
+            local msg = string.format("%s didn't make it: back with you once they press Continue", p.name)
+            draw.text(msg, cx - #msg * 3.5, 560, 0xFF4040FF)
         end
     end
 end

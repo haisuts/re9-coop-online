@@ -894,6 +894,47 @@ way round; drawers and cabinets open without their movement.
   its arena and spawn in the guest's game (the guest's story behind), the guest never had a copy and
   the boss stayed with the downed host.
 
+## v0.12.5 (2026-10-20) — every boss on the stand, start to death; a dead runner hands over
+
+- Chapter sweep on the stand (tools/stand_sweep.py: the host jumps, the guest follows by itself, a
+  sync check, the bosses there, both logs): both games in all 18 chapters the game loads by a jump
+  (Chap1_01 .. Chap5_10, Grace's and Leon's), the guest following the host each time, 0 mod errors.
+  Not loadable by a jump (the same with one game; ff_01 / ff_02 and Chap5_05 from the one-game sweep
+  only): Chap1_00 (-> Chap1_01), Chap3_04 and Chap3_324 (-> Chap3_0304), Chap4_00 and Chap4_20
+  (-> Chap4_1020), Chap4_50 (-> Chap4_4050), ff_01 / ff_02 (-> Chap5_10); Chap5_03 / 04 / 05 hang on
+  a black load screen.
+- LAN test mode (plugin 0.3.1): a message bigger than one datagram (the sync check's answer in big
+  chapters, 70+ KB) goes in pieces of 60 KB and is put back together; before, it was dropped and the
+  check came back empty from Chap3_03 on. Steam's own path unchanged.
+- Sync checks (12 chapters again with the pieces): items and enemies the same in every one. Gimmicks:
+  1 to 7 contexts whose saved state has structures in one game only (ReliefItemDropBanData, a few
+  "14 fields here, 17 there"), nothing to write them into. Story: 1 to 3 flows; the game sets flows on
+  a chapter load without setProgressiveNumber (nothing to send), the host's whole-chapter catch-up
+  moves the guest's on but never back, so a flow the guest's own load put further stays further.
+- Bosses (tools/stand_boss.py: arena folder, the spawn in the host's game only, both players next to
+  it, the runner put down, then the other player's hits on its copy, 4 x 30% of its health): C100
+  (Chap3_02), B052 and B032 (Chap3_40), B700 (Chap4_10), C510 (Chap4_40), C610 (Chap5_10), the B800
+  stalker (Chap3_03). Each: in the guest's game by the mod, run by the host, to the guest when the
+  host went down, the hits on the copy counted in the runner's game (e.g. C510 25000 -> 17500 -> 10000
+  -> 2500 -> dead), dead in both. C510 the only one awake without its entrance scene: it walked to its
+  runner and the copy followed it. Found and fixed:
+  - A boss keeps its own no-death on until its last phase (ReferenceCountBoolRequestHolder NoDeath;
+    C610 and B800 before their fights, the game putting it back after a clear). The copy never got
+    there: the owner's boss died, the copy's lethal hit left it at 1 HP with its AI back. Now its
+    no-death is cleared (applyRequestHashSet with an empty set) in the same frame as the hit, again
+    every 0.5 s until it is down (8 tries).
+  - An enemy with no spawn control in the guest's game (C100, B700: they come in through one of their
+    spawn params) never appeared there: the guest's copy is spawned through the param of its kind
+    that manages it (get_ManagedContextID), the one nearest to where the owner has it.
+  - A player on the game over screen kept their enemies (they weren't "down"): the partner fought a
+    frozen boss until "Continue". A dead player sends pose flag 1024; the arbiter treats it as down:
+    their enemies went to the partner within 1.5 s (a zombie, the host killed for real). A downed
+    player whose partner is dead has nobody to get them up (game over as for both down); the partner's
+    screen says they're back after "Continue".
+- stand.py: "Continue" on the title screen again until the title is there (it wasn't yet); the
+  REFramework menu closed at start (it took the input); the second game's revive setting had been
+  left off by an earlier test.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

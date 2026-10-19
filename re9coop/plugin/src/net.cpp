@@ -104,7 +104,9 @@ std::deque<LoopPacket> g_loop;
 // --- LAN test transport: two games on one PC (tools/stand.py), both on the same Steam account, so
 // Steam can't connect them. With reframework/data/re9coop_bridge/lan.txt next to the game, the
 // lobby is local: datagrams on 127.0.0.1 between the two ports named there, nothing goes to Steam.
-// Datagram: [kind: 0 hello, 1 data][channel][payload]; a hello's payload: [in lobby][hosting][name].
+// Datagram: [kind: 0 hello, 1 data, 2 a piece of a bigger message][channel][payload]; a hello's payload:
+// [in lobby][hosting][name]; a piece's: [message id u32][index u16][count u16][part] (a sync-check
+// answer is bigger than one datagram in some chapters).
 constexpr std::uint64_t kLanLobby = 4242;
 struct Lan {
     bool on{false};
@@ -115,8 +117,17 @@ struct Lan {
     ULONGLONG peer_seen{0}, next_hello{0};
     bool peer_in_lobby{false}, peer_hosting{false};
     std::deque<std::string> in[kMaxChannels];
+    std::uint32_t next_id{1};
+    struct Partial {
+        int channel{0};
+        std::uint16_t count{0}, got{0};
+        std::vector<std::string> parts;
+        ULONGLONG t{0};
+    };
+    std::unordered_map<std::uint32_t, Partial> partial;
 };
 Lan g_lan;
+constexpr size_t kLanPiece = 60000;
 
 bool lan_config() {
     char exe[MAX_PATH];
@@ -192,7 +203,50 @@ void lan_pump() {
             g_lan.peer_name.assign(buf + 4, n - 4);
         } else if (buf[0] == 1 && ch < kMaxChannels && g_st.state == State::InLobby && g_lan.in[ch].size() < 4096) {
             g_lan.in[ch].emplace_back(buf + 2, n - 2);
+        } else if (buf[0] == 2 && ch < kMaxChannels && g_st.state == State::InLobby && n >= 10) {
+            std::uint32_t id;
+            std::uint16_t index, count;
+            std::memcpy(&id, buf + 2, 4);
+            std::memcpy(&index, buf + 6, 2);
+            std::memcpy(&count, buf + 8, 2);
+            if (count == 0 || index >= count || count > 256) continue;
+            auto& pt = g_lan.partial[id];
+            if (pt.count == 0) {
+                pt.channel = ch;
+                pt.count = count;
+                pt.parts.assign(count, std::string());
+            }
+            pt.t = GetTickCount64();
+            if (pt.parts[index].empty()) {
+                pt.parts[index].assign(buf + 10, n - 10);
+                ++pt.got;
+            }
+            if (pt.got == pt.count) {
+                std::string whole;
+                for (auto& part : pt.parts) whole += part;
+                if (g_lan.in[pt.channel].size() < 4096) g_lan.in[pt.channel].push_back(std::move(whole));
+                g_lan.partial.erase(id);
+            }
         }
+    }
+    // pieces of a message that never completed
+    const auto now = GetTickCount64();
+    for (auto it = g_lan.partial.begin(); it != g_lan.partial.end();) {
+        if (now - it->second.t > 10000) it = g_lan.partial.erase(it);
+        else ++it;
+    }
+}
+
+void lan_send_big(int channel, const std::string& data) {
+    const std::uint32_t id = g_lan.next_id++;
+    const auto count = static_cast<std::uint16_t>((data.size() + kLanPiece - 1) / kLanPiece);
+    for (std::uint16_t i = 0; i < count; ++i) {
+        std::string piece(8, '\0');
+        std::memcpy(&piece[0], &id, 4);
+        std::memcpy(&piece[4], &i, 2);
+        std::memcpy(&piece[6], &count, 2);
+        piece.append(data, static_cast<size_t>(i) * kLanPiece, kLanPiece);
+        lan_send_raw(2, channel, piece.data(), piece.size());
     }
 }
 
@@ -606,10 +660,15 @@ int send(const std::string& data, bool reliable, int channel, std::uint64_t to) 
     }
     if (!g_inited || g_st.state != State::InLobby) return count;
     if (g_lan.on) {
-        // one datagram each: the biggest message (a 60 KB piece of the host's world) fits
-        if (data.size() <= 65000 && lan_peer_member() && (to == 0 || to == g_lan.peer_id)) {
-            lan_send_raw(1, channel, data.data(), data.size());
-            ++count;
+        // one datagram each, or pieces for a bigger one (at most 256 x 60 KB)
+        if (lan_peer_member() && (to == 0 || to == g_lan.peer_id)) {
+            if (data.size() <= 65000) {
+                lan_send_raw(1, channel, data.data(), data.size());
+                ++count;
+            } else if (data.size() <= kLanPiece * 256) {
+                lan_send_big(channel, data);
+                ++count;
+            }
         }
         return count;
     }

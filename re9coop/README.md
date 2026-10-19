@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.4
+# RE9 Co-op (online) — v0.12.5
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -39,13 +39,15 @@ from it is used.
   laser microscope) is unlocked in the partner's game too, marked as new.
 - **Boss fights**: a boss is run by one player for the whole fight (the one nearer when it appears),
   so its phases and attack patterns aren't broken by handing it back and forth. The other player sees
-  it move for move and their hits count. It only changes hands when its player leaves the fight.
+  it move for move and their hits count. It only changes hands when its player leaves the fight, goes
+  down or dies (on the game over screen): then the other player gets it at once. When it dies in one
+  game it dies in the other too (even a boss that can't die there yet).
 - **Cutscenes**: the partner is hidden while either of you is in one.
 - **Downed, not dead**: while your partner is with you, a hit that would kill you leaves you on your
   last breath instead — you can't move or shoot, enemies can't hurt you more — and your partner gets
   you up by crouching next to you for 2.5 s (you come back with a third of your health). If nobody
-  gets you up within 30 s, you come to next to your partner (no game over). If your partner leaves, or
-  you both go down, it's game over as usual.
+  gets you up within 30 s, you come to next to your partner (no game over). If your partner leaves,
+  you both go down, or your partner has died, it's game over as usual.
 - **After a game over**: the player who died continues from their last save as usual; the partner who
   stayed sends them the chapter as it is now (story steps, locks and puzzles, item box, recipes, the
   pickups made), so their world catches up instead of the other one going back.
@@ -318,7 +320,15 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   (the guest 1.6 m from it) and was still out 8 s later.
 - v0.12.4 on the stand, the C100 boss (spawned at its arena in both games): it went for the host and
   put them down, then moved to the guest's game and went for the guest.
-- Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
+- v0.12.5 on the stand: both games in all 18 chapters a jump reaches (Grace's and Leon's, Chap1_01 to
+  Chap5_10), the guest following the host each time, 0 mod errors; items and enemies the same in every
+  sync check. Bosses C100, B052, B032, B700, C510, C610 and the B800 stalker, each spawned in the
+  host's game only: in the guest's game too, to the guest when the host went down, the hits on the
+  copy counted (C510: 25000, 17500, 10000, 2500, dead), dead in both games. The host killed for real:
+  their zombie went to the guest within 1.5 s.
+- Not yet: a real two-PC session; boss fights started by their own entrance scenes (on the stand they
+  were spawned by hand, and only C510 moved and fought without its scene); Chap5_03 to Chap5_05 and the
+  bosses there (a test jump can't load them).
 
 ## How it works
 - `re9coop_net.dll` (REFramework plugin, C++): uses the game's own `steam_api64.dll` — a friends-only
@@ -387,7 +397,9 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   in the other; their light switch is shared.
 - An enemy attacks the player whose game runs it: the nearer one; a boss the one it started with,
   until that player is down or has left it (20 m off, the other one within 8 m), then the other.
-- Story sharing is experimental: a step can start a cutscene or move the other player.
+- Story sharing is experimental: a step can start a cutscene or move the other player. After the guest
+  follows into a new chapter, 1 to 3 of its ~640 story flows can stay ahead of the host's (its own
+  chapter load set them; the host's catch-up moves flows on, never back).
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
   the first through the network code). The first real two-PC session may still find problems — please
   send `re2_framework_log.txt` from both games.

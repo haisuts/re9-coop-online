@@ -22,7 +22,7 @@ extern "C" {
 
 #include "net.hpp"
 
-#define RE9COOP_NET_VERSION "0.3.0"
+#define RE9COOP_NET_VERSION "0.3.1"
 
 namespace {
 
