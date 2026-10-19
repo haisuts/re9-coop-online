@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.2"
-local PROTO = 12
+local VERSION = "0.12.3"
+local PROTO = 13
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -353,7 +353,7 @@ local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
     CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36, CHECK_REQ = 37, CHECK = 38,
-    BODY_SOUND = 39 }
+    BODY_SOUND = 39, DOOR_ANGLE = 41, GIM_JOINT = 42 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 -- 512 (written as a number where used: the main chunk is at its 200 locals): off the ground, falling or
@@ -954,7 +954,7 @@ local function on_ctrl(from, data)
         drop_peer(from)
     elseif kind >= MSG_ENEMY and kind <= MSG_ENEMY_PRESENCE and enemy_ctrl then
         enemy_ctrl(from, kind, data)
-    elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN) and world_ctrl then
+    elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN or kind == MSG.DOOR_ANGLE or kind == MSG.GIM_JOINT) and world_ctrl then
         ext.later(function() world_ctrl(from, kind, data) end)
     elseif (kind == MSG_GIMMICK or kind == MSG_GIMMICK_FLAGS or kind == MSG.GIMMICK_TRIGGER) and gimmick_ctrl then
         gimmick_ctrl(from, kind, data)
@@ -1741,9 +1741,17 @@ end
 -------------------------------------------------------------------------------------------------
 -- shared doors and pickups
 -------------------------------------------------------------------------------------------------
--- Doors (app.GmDoorV3) swing open when pushed: one GmDoorV3.addForce(RequestInfo) call. Every push
--- here (except the door's own auto-close) is sent to the partner, whose game pushes the same door the
--- same way. Pickups: when an item (app.ItemCore) is picked up here, the partner's copy of it is
+-- Doors (app.GmDoorV3): what is shared is the door's angle (_CurrAngle), not what moved it. A door
+-- moves with the player's own body: walked into, it's pushed by contact every frame (hundreds of
+-- GmDoorV3.addForce calls); opened with the interact key, it follows the player's hand
+-- (IGimmickDoor.requestInteractOpen puts it under external control, the player's motion turns it).
+-- Replaying a push on the partner's copy hardly moved it (0.2 degrees) and an interact open not at all,
+-- so the partner walked through a closed door. Now the game whose player moves a door sends its angle
+-- 15 times a second while it moves and once more when it stops; the partner's game turns its copy to
+-- that angle (written into _CurrAngle and _TargetAngle every frame, at most 360 degrees a second: the
+-- door's own update turns its hinge joint from them) and holds it while the stream goes on, and a
+-- door left open there stays open here (its own auto-close would shut it through the partner). A door our
+-- own player is pushing just now is ours: the partner's angle waits. Pickups: when an item (app.ItemCore) is picked up here, the partner's copy of it is
 -- despawned through its ItemContext (set_IsSpawn(false)), the way the game removes taken items.
 -- Doors and items are matched by their scene GUIDs (GimmickCore / ItemCore context IDs). Items made
 -- at runtime (enemy drops) have per-PC IDs and aren't shared. Key-locked doors aren't unlocked for
@@ -1822,24 +1830,95 @@ world_shared = function()
     return st_net ~= nil and st_net.state == "in_lobby" and session.last_members ~= ""
 end
 
+-- our own player moving a door: it's ours for a moment (the partner's angle for it waits). Walked
+-- into: pushes of ActionType Normal; opened with the interact key: requestInteractOpen with our
+-- player next to it. Not UniformSpeed pushes: a closing door pushes itself with those every frame
+-- (force 3000, direction -1), and counted as ours they threw away every angle the partner sent.
 sdk.hook(M_DOOR_FORCE, function(args)
     if world.applying or not world_shared() then return end
     local id = world.door_ids[sdk.to_int64(args[2])]
     if id == nil then return end
-    local t = now()
-    if t - (world.applied_at[id] or -10) < 0.5 or t - (world.sent_at[id] or -10) < 0.15 then return end
     local info = sdk.to_managed_object(args[3])
-    if info == nil then return end
-    local action = info:get_field("ActionType")
-    if not DOOR_SHARED[action or 0] or action == DOOR_AUTO_CLOSE or #world.out >= 32 then return end
-    -- only our real pushes count as "ours" (the door's own closing calls this too, all the time: counted,
-    -- they made every push of the partner's be dropped and the door never opened for them)
+    if info == nil or (info:get_field("ActionType") or 0) ~= 0 then return end
     world.mine_at = world.mine_at or {}
-    world.mine_at[id] = t
-    world.sent_at[id] = t
-    world.out[#world.out + 1] = string.pack("<Bs1s1BfI4", MSG_DOOR, me.chapter, id, action or 0,
-        info:get_field("Force") or 1.0, (info:get_field("ForceDir") or 1) & 0xFFFFFFFF)
+    world.mine_at[id] = now()
 end, nil)
+for _, m in ipairs(sdk.find_type_definition("app.GmDoorV3"):get_methods()) do
+    if m:get_name():find("requestInteractOpen", 1, true) then
+        sdk.hook(m, function(args)
+            if world.applying or me.go == nil then return end
+            local id = world.door_ids[sdk.to_int64(args[2])]
+            local d = id and world.doors[id]
+            if d == nil then return end
+            local dp = d:call("get_GameObject"):call("get_Transform"):call("get_Position")
+            if (dp - me.go:call("get_Transform"):call("get_Position")):length() < 2.5 then
+                world.mine_at = world.mine_at or {}
+                world.mine_at[id] = now() + 1.5 -- the hand's turn takes a while
+            end
+        end, nil)
+    end
+end
+
+-- the angles of the doors moving here, and the partner's we turn our copies to
+world.angle = { last = {}, moving = {}, sent_at = {}, drive = {}, next = 0, late_t = nil }
+local DOOR_SEND_HZ, DOOR_DEG_PER_S = 15, 360
+world.angle_scan = function(t_now)
+    local A = world.angle
+    if t_now < A.next then return end
+    A.next = t_now + 1 / DOOR_SEND_HZ
+    for id, d in pairs(world.doors) do
+        local ok, a = pcall(d.get_field, d, "_CurrAngle")
+        if ok and type(a) == "number" then
+            local la = A.last[id]
+            A.last[id] = a
+            if A.drive[id] == nil and t_now - (A.driven_at and A.driven_at[id] or -10) > 0.5 and #world.out < 48 then
+                if la and math.abs(a - la) > 0.3 then
+                    A.moving[id] = t_now
+                    world.out[#world.out + 1] = string.pack("<Bs1s1fB", MSG.DOOR_ANGLE, me.chapter, id, a, 0)
+                elseif A.moving[id] and t_now - A.moving[id] > 0.3 then
+                    A.moving[id] = nil
+                    world.out[#world.out + 1] = string.pack("<Bs1s1fB", MSG.DOOR_ANGLE, me.chapter, id, a, 1)
+                end
+            end
+        end
+    end
+end
+
+world.angle_ctrl = function(data)
+    local _, chapter, id, a, final = string.unpack("<Bs1s1fB", data)
+    if chapter ~= me.chapter or world.doors[id] == nil then return end
+    if now() - ((world.mine_at or {})[id] or -10) < 1.0 then return end -- ours just now
+    world.angle.drive[id] = { target = a, t = now(), final = final == 1 }
+    world.stats.doors_applied = world.stats.doors_applied + 1
+end
+
+-- every frame: our copies of the doors the partner moves, turned toward the partner's angle
+re.on_application_entry("LateUpdateBehavior", function()
+    local A = world.angle
+    local t = now()
+    local dt = math.min(0.1, t - (A.late_t or t))
+    A.late_t = t
+    if next(A.drive) == nil then return end
+    A.driven_at = A.driven_at or {}
+    for id, dv in pairs(A.drive) do
+        local d = world.doors[id]
+        local ok, cur = pcall(function() return d and d:get_field("_CurrAngle") end)
+        -- let go: our own player moves it, the stream stopped mid-move (3 s), or a door left open there
+        -- for 30 s (a door held open there by the partner standing in it stays open here meanwhile)
+        local quiet = t - dv.t
+        if not ok or type(cur) ~= "number" or quiet > (dv.final and 30 or 3) or t - ((world.mine_at or {})[id] or -10) < 1.0 then
+            A.drive[id] = nil
+        else
+            local step = DOOR_DEG_PER_S * math.max(dt, 1 / 120)
+            local new = cur + math.max(-step, math.min(step, dv.target - cur))
+            pcall(d.set_field, d, "_CurrAngle", new)
+            pcall(d.set_field, d, "_TargetAngle", new)
+            A.driven_at[id] = t
+            A.last[id] = new
+            if dv.final and math.abs(dv.target) < 1 and math.abs(new - dv.target) < 0.5 and quiet > 0.5 then A.drive[id] = nil end
+        end
+    end
+end)
 
 -- Items each player gets their own copy of: picking one up here leaves the partner's copy for them
 -- (weapons, key items, files, maps, upgrades...). Ammo, healing and crafting materials are shared:
@@ -1880,7 +1959,11 @@ end, nil)
 world_ctrl = function(from, kind, data)
     if not world_shared() then return end
     refresh_world(now())
-    if kind == MSG_DOOR then
+    if kind == MSG.DOOR_ANGLE then
+        world.angle_ctrl(data)
+    elseif kind == MSG.GIM_JOINT then
+        if ext.joint_ctrl then ext.joint_ctrl(data) end
+    elseif kind == MSG_DOOR then
         local _, chapter, id, action, force, dir = string.unpack("<Bs1s1BfI4", data)
         local door = chapter == me.chapter and world.doors[id]
         if not door or not DOOR_SHARED[action] then return end
@@ -1913,13 +1996,15 @@ end
 world_late = function(t_now)
     if not world_shared() then return end
     refresh_world(t_now)
+    world.angle_scan(t_now)
+    if ext.joint_scan then pcall(ext.joint_scan, t_now) end
     if #world.out == 0 then return end
     local out = world.out
     world.out = {}
     for _, blob in ipairs(out) do
         local kind = string.byte(blob, 1)
         send_ctrl(blob)
-        if kind == MSG_DOOR then
+        if kind == MSG_DOOR or kind == MSG.DOOR_ANGLE then
             world.stats.doors_sent = world.stats.doors_sent + 1
         else
             world.stats.items_sent = world.stats.items_sent + 1
@@ -2704,6 +2789,178 @@ gimmicks_late = function(t_now)
     end
 end
 end
+-- Drawers, cabinet doors, levers: moved with the player's hand. A gimmick of this kind keeps, for each
+-- of its positions, the joints it moves and where to (GmStorageV2 / GmSwitchV2 _Params: GimmickParam
+-- with GimmickInterpolationParam entries: _JointName "Drawer", the target _Position / _Rotation); the
+-- player's action takes the joint there (InteractActionPlayerAction, its _TargetJointName the same).
+-- The partner's game got only the gimmick's data, which moves nothing (its index, its action type,
+-- its interpolation timer written: the drawer stayed shut). So the game whose player moves such a
+-- joint sends its local position and rotation 15 times a second while it moves, and once more when
+-- it stops; the partner's game takes its copy's joint there (written every frame, eased) and holds it
+-- 5 s more: a drawer near a player is put back to its data's pose by its own update every frame while
+-- its data says closed (GmStorageData._ActionType 0), and stays wherever its joint is once the data
+-- says opened (2), which comes with the gimmick states. Only gimmicks within 8 m of a player are watched.
+;(function()
+local NEAR, HZ = 8, 15
+local J = { index = {}, index_t = 0, index_chapter = "", near = {}, near_t = 0, last = {}, moving = {}, drive = {},
+    driven_at = {}, next = 0, late_t = nil, stats = { sent = 0, applied = 0 } }
+ext.gim_joints = J
+
+-- the moving joints of the gimmicks within 16 m of a player: id -> { body, joints, storage }; looked
+-- at every 2 s (a gimmick's area loads when a player comes near), each body's parts read once
+local function joints_of(body)
+    local joints, storage = {}, nil
+    local okc, comps = pcall(function() return body:call("get_Components"):get_elements() end)
+    for _, c in ipairs(okc and comps or {}) do
+        local tn = c:get_type_definition():get_full_name()
+        if tn == "app.GmStorageV2" then storage = c end
+        if tn == "app.GmStorageV2" or tn == "app.GmSwitchV2" then
+            local okp, params = pcall(function() return c:get_field("_Params"):get_elements() end)
+            for _, prm in ipairs(okp and params or {}) do
+                local oki, inner = pcall(function() return prm:get_field("_Params"):get_elements() end)
+                for _, q in ipairs(oki and inner or {}) do
+                    local okj, j = pcall(q.get_field, q, "_Joint")
+                    if okj and j then
+                        local a = j:get_address()
+                        local dup = false
+                        for _, x in ipairs(joints) do if x:get_address() == a then dup = true end end
+                        if not dup then joints[#joints + 1] = j end
+                    end
+                end
+            end
+        end
+    end
+    return #joints > 0 and { joints = joints, storage = storage } or false
+end
+
+local function build_index(t_now, force)
+    if not force and t_now < J.index_t and J.index_chapter == me.chapter then return end
+    J.index_t = t_now + 2
+    if J.index_chapter ~= me.chapter then J.cache, J.index_chapter = {}, me.chapter end
+    J.cache = J.cache or {}
+    local here = me.go and me.go:call("get_Transform"):call("get_Position")
+    local there = peer_position and peer_position()
+    if here == nil then return end
+    local idx = {}
+    for _, gc in ipairs(gim.contexts_of(t_now)) do
+        local okb, body = pcall(gc.call, gc, "get_BodyGameObject")
+        if okb and body then
+            local okp, p = pcall(function() return body:call("get_Transform"):call("get_Position") end)
+            if okp and ((p - here):length() < NEAR * 2 or (there and (p - there):length() < NEAR * 2)) then
+                local a = body:get_address()
+                local c = J.cache[a]
+                if c == nil then
+                    c = joints_of(body)
+                    J.cache[a] = c
+                end
+                local id = c and gim.id_of(gc)
+                if id then idx[id] = { body = body, joints = c.joints, storage = c.storage } end
+            end
+        end
+    end
+    J.index = idx
+end
+
+-- the ones near a player (every second)
+local function near_list(t_now)
+    if t_now < J.near_t then return J.near end
+    J.near_t = t_now + 1
+    local here = me.go:call("get_Transform"):call("get_Position")
+    local there = peer_position and peer_position()
+    local list = {}
+    for id, g in pairs(J.index) do
+        local ok, p = pcall(function() return g.body:call("get_Transform"):call("get_Position") end)
+        if ok and ((p - here):length() < NEAR or (there and (p - there):length() < NEAR)) then list[#list + 1] = id end
+    end
+    J.near = list
+    return list
+end
+
+local function moved(a, b)
+    return math.abs(a[1] - b[1]) + math.abs(a[2] - b[2]) + math.abs(a[3] - b[3]) > 0.002
+        or math.abs(a[4] - b[4]) + math.abs(a[5] - b[5]) + math.abs(a[6] - b[6]) + math.abs(a[7] - b[7]) > 0.002
+end
+
+ext.joint_scan = function(t_now)
+    if me.go == nil or t_now < J.next then return end
+    J.next = t_now + 1 / HZ
+    build_index(t_now)
+    for _, id in ipairs(near_list(t_now)) do
+        local g = J.index[id]
+        -- a drawer's open / closed state (GmStorageData._ActionType) isn't in the gimmick's stored state
+        -- (store() leaves GmStorageData out): it goes with the joint, or the partner's copy is shut
+        -- again by its own update once the hold ends
+        local okd, act = pcall(function() return g.storage and g.storage:get_field("_GmStorageData"):get_field("_ActionType") end)
+        act = okd and type(act) == "number" and act or 255
+        for k, j in ipairs(g and g.joints or {}) do
+            local key = id .. ":" .. k
+            local ok, lp, lr = pcall(function() return j:call("get_LocalPosition"), j:call("get_LocalRotation") end)
+            if ok and lp and lr then
+                local v = { lp.x, lp.y, lp.z, lr.x, lr.y, lr.z, lr.w }
+                local last = J.last[key]
+                J.last[key] = v
+                local ours = J.drive[key] == nil and t_now - (J.driven_at[key] or -10) > 0.5
+                if ours and last and moved(v, last) then
+                    J.moving[key] = t_now
+                    world.out[#world.out + 1] = string.pack("<Bs1s1Bfffffff BB", MSG.GIM_JOINT, me.chapter, id, k, v[1], v[2], v[3], v[4], v[5], v[6], v[7], 0, act)
+                    J.stats.sent = J.stats.sent + 1
+                elseif ours and J.moving[key] and t_now - J.moving[key] > 0.3 then
+                    J.moving[key] = nil
+                    world.out[#world.out + 1] = string.pack("<Bs1s1Bfffffff BB", MSG.GIM_JOINT, me.chapter, id, k, v[1], v[2], v[3], v[4], v[5], v[6], v[7], 1, act)
+                end
+            end
+        end
+    end
+end
+
+ext.joint_ctrl = function(data)
+    local _, chapter, id, k, x, y, z, qx, qy, qz, qw, final, act = string.unpack("<Bs1s1Bfffffff BB", data)
+    if chapter ~= me.chapter then return end
+    build_index(now())
+    if J.index[id] == nil and now() - (J.forced_t or -10) > 1 then
+        J.forced_t = now()
+        build_index(now(), true)
+    end
+    local g = J.index[id]
+    local j = g and g.joints[k]
+    if j == nil then return end
+    if g.storage and act ~= 255 then
+        pcall(function() g.storage:get_field("_GmStorageData"):set_field("_ActionType", act) end)
+    end
+    J.drive[id .. ":" .. k] = { j = j, pos = Vector3f.new(x, y, z), rot = Quaternion.new(qw, qx, qy, qz), t = now(), final = final == 1 }
+    J.stats.applied = J.stats.applied + 1
+end
+
+-- every frame: our copies' joints eased toward the partner's
+re.on_application_entry("LateUpdateBehavior", function()
+    if next(J.drive) == nil then return end
+    local t = now()
+    local dt = math.min(0.1, t - (J.late_t or t))
+    J.late_t = t
+    local f = math.min(1, math.max(dt, 1 / 120) * HZ)
+    for key, dv in pairs(J.drive) do
+        local ok = pcall(function()
+            local lp, lr = dv.j:call("get_LocalPosition"), dv.j:call("get_LocalRotation")
+            local np = lp + (dv.pos - lp) * f
+            local nr = lr:slerp(dv.rot, f)
+            dv.j:call("set_LocalPosition", np)
+            dv.j:call("set_LocalRotation", nr)
+            J.driven_at[key] = t
+            J.last[key] = { np.x, np.y, np.z, nr.x, nr.y, nr.z, nr.w }
+            -- held 5 s after the last: a drawer whose data still says closed is put back shut by its own
+            -- update every frame (near a player), until the partner's data ("opened") arrives; then it
+            -- stays where the joint is
+            if t - dv.t > (dv.final and 5 or 3) then
+                dv.j:call("set_LocalPosition", dv.pos)
+                dv.j:call("set_LocalRotation", dv.rot)
+                J.drive[key] = nil
+            end
+        end)
+        if not ok then J.drive[key] = nil end
+    end
+end)
+end)()
+
 
 -------------------------------------------------------------------------------------------------
 -- shared story progress and chapters

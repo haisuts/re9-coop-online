@@ -851,6 +851,36 @@ A player's report from the stand: after the guest's game over, "Continue" and ev
 - tools/fg.ps1: brings one window to the front (um win drive sends input to whichever re9 window is
   in front: with two games, this picks the one).
 
+## v0.12.3 (2026-10-19) — doors by their angle, drawers and levers by their joints
+
+The report: a door the guest opens stays shut at the host, the guest walks through it, and the other
+way round; drawers and cabinets open without their movement.
+
+- Doors move with the player's body: walked into, by contact pushes every frame (hundreds of
+  GmDoorV3.addForce Normal calls); opened with the interact key, IGimmickDoor.requestInteractOpen puts
+  them under external control and the player's hand turns them (alone it gives the door a target of 90
+  degrees and nothing moves). One push replayed on the partner's copy moved it 0.2 degrees; an addForce
+  UniformSpeed alone doesn't move a door at all. Now the angle is shared (MSG.DOOR_ANGLE): the game
+  where a door moves sends _CurrAngle 15 times a second and once when it stops; the other game writes
+  it into _CurrAngle and _TargetAngle every frame (eased, at most 360 degrees a second: the door's own
+  update turns its hinge joint from them; checked, the Door_R joint turned 45 degrees) and holds an
+  open door open (30 s, until it moves again there, or our own player pushes it). Our own door: Normal
+  pushes, or requestInteractOpen with our player next to it; not UniformSpeed pushes: a closing door
+  pushes itself with those every frame (force 3000, direction -1), and taken for ours they threw away
+  every angle the partner sent.
+- Drawers, cabinet doors, levers: GmStorageV2 / GmSwitchV2 keep per position the joints they move and
+  where to (GimmickParam -> GimmickInterpolationParam: _JointName "Drawer", target _Position); the
+  player's action carries the joint there (InteractActionPlayerAction, _TargetJointName "Drawer"). Their
+  data alone moves nothing (index, action type, interpolation timer all written: shut). Now the moving
+  joints of gimmicks within 8 m of a player are watched and their local position / rotation sent like
+  the doors' angle (MSG.GIM_JOINT), written on the partner's copy and held 5 s. A drawer near a player is
+  put back to its data's pose every frame while its data says closed (GmStorageData._ActionType 0) and
+  stays put once it says opened (2); store() leaves GmStorageData out, so its action goes with the joint.
+- Checked on the stand: door: host -60 degrees, guest's copy -41 when read, both shut together after.
+  Drawer: 0.3 m out at the host, out at the guest (1.6 m from it), data "opened", still out 8 s later.
+  A real hand-opened drawer is not filmed yet (the interact key took the pencil on the desk instead).
+- PROTO 13.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

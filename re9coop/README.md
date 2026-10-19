@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.2
+# RE9 Co-op (online) — v0.12.3
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -18,8 +18,10 @@ from it is used.
 - **Switches and breakables the game's way**: a light switch your partner flips or a crate they break
   switches and breaks in your game too, with its own animation, debris and sound (other puzzles and
   locks still jump to the partner's state).
-- **Shared doors and pickups**: a door your partner pushes open opens in your game too; an item your
-  partner picks up disappears from yours. A door you opened before that won't move any more (a
+- **Shared doors and pickups**: a door your partner opens (walking into it or with the interact key)
+  swings open in your game too, at the same angle, and closes with theirs; a drawer they pull out or a
+  cabinet door / lever they move moves the same way in yours. An item your partner picks up disappears
+  from yours. A door you opened before that won't move any more (a
   session with an older version could leave doors held by a scene that never plays in your game):
   the mod's menu then shows "Free stuck doors"; press it as the host (or alone), then save.
 - **Story steps (experimental)**: every level-flow step either of you takes is taken by the other
@@ -114,7 +116,9 @@ Both players need the same mod version. Steam has to be running (the game needs 
 - **Выключатели и ломаемые предметы:** выключатель, который щёлкнул напарник, и ящик, который он
   разбил, переключаются и ломаются и у вас — со своей анимацией, обломками и звуком (остальные загадки
   и замки по-прежнему просто встают в состояние напарника).
-- **Двери:** толкнули дверь — она открывается и у напарника. Если дверь, которую вы уже открывали,
+- **Двери и ящики:** дверь, которую открыл напарник (вошёл в неё или нажал кнопку), открывается и у вас
+  на тот же угол и закрывается вместе с его дверью; выдвинутый им ящик, открытая дверца шкафа или рычаг
+  двигаются у вас так же. Если дверь, которую вы уже открывали,
   больше не двигается (после сессии со старой версией двери могли остаться «удержанными» сценкой,
   которая в вашей игре не идёт), в меню мода появится кнопка «Free stuck doors»: нажмите её у хоста
   (или в одиночной игре) и сохранитесь.
@@ -309,6 +313,9 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   its copy of the zombie during the grab killed it in both games and ended the grab (rescues 1). After
   a guest's game over, "Continue" loaded the host's world and both stood on the floor; a player moved
   60 m under the floor was put back within a second.
+- v0.12.3 on the stand: the host walked into a door (-60 degrees), the guest's copy followed (-41 when
+  read) and both closed together; a drawer pulled out 0.3 m in the host's game came out in the guest's
+  (the guest 1.6 m from it) and was still out 8 s later.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
