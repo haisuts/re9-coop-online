@@ -16,7 +16,7 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.0"
+local VERSION = "0.12.1"
 local PROTO = 12
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
@@ -2170,7 +2170,10 @@ local function apply_gimmick(data, guest)
         local tname, fname, tag, v
         tname, fname, tag, v, pos = string.unpack("<s1s1Bi8", data, pos)
         want[tname] = want[tname] or {}
-        want[tname][fname] = tag == T_BOOL and (v ~= 0) or v
+        -- not `tag == T_BOOL and (v ~= 0) or v`: for a false that gives 0, and a 0 written into a
+        -- System.Boolean field reads back true (v0.5.0 to v0.12.0: every false the partner sent came out
+        -- true here: locks shut again, doors held, puzzles done)
+        if tag == T_BOOL then want[tname][fname] = v ~= 0 else want[tname][fname] = v end
     end
     if want[PERSONAL_DATA] then return end
     gimmick_contexts(now())

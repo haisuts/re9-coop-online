@@ -798,6 +798,28 @@ This version adds what could be built and checked on one PC; see "Next steps" fo
   0.10 session (the guest's world was its own new game). The sync check reports enemy positions.
 - PROTO 12.
 
+## v0.12.1 (2026-10-19) — every false the partner sent came out true; a two-game test stand
+
+- The bug behind the locked and held doors (and much of "everything broke when my friend joined"):
+  apply_gimmick read each field of the partner's gimmick message as
+  `want = tag == T_BOOL and (v ~= 0) or v`. For a false that is `false or 0`, so 0; and a Lua 0 written
+  into a System.Boolean field with set_field reads back true (checked: false, set_field(0) -> true,
+  set_field(false) -> false). Since v0.5.0 every false in a partner's gimmick state came out true on
+  the other side: locks shut again (_IsLock), doors held by a scene that never plays
+  (GmDoorData._IsConstMode, _IsMotionFollowMode), puzzles done (_IsDone), on the guest at every join
+  (the host's 684 states) and on the host from every change the guest sent. Fixed (an if, not and/or).
+- Found by the new stand: tools/stand.py makes a second game folder (hard links to the 77 GB of game
+  files, copies of what the game writes), starts both games with the lowest graphics in a window, the
+  save guard and the dev bridge in both, and the network plugin's LAN test mode (re9coop_net 0.3.0):
+  with reframework/data/re9coop_bridge/lan.txt the plugin's lobby is two UDP ports on 127.0.0.1, so two
+  games on one Steam account can play together; without that file nothing changes. `stand.py coop`:
+  the host continues from the latest save and hosts, the guest joins from its title screen.
+  tools/bridge.py -g 2 talks to the second game. Both run at once on an RTX 4070 (6.7 GB used at the
+  title, GPU 85%). stand.py stop puts the player's own graphics settings back.
+- Checked on the stand: the guest's sync check before the fix: 442 of 684 gimmicks different, all of
+  them fields true here and false at the host; after it: 0 story flows, 0 gimmicks, 0 items, 0 enemies,
+  both copies of the players with 68 of 68 joints matched.
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

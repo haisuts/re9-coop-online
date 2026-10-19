@@ -1,6 +1,7 @@
 #include "net.hpp"
 #include "steam_flat.hpp"
 
+#include <winsock2.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -98,6 +100,128 @@ std::unordered_set<std::uint64_t> g_heard;                 // members we've rece
 std::uint64_t g_pending_join{0};
 int g_loop_delay{0};
 std::deque<LoopPacket> g_loop;
+
+// --- LAN test transport: two games on one PC (tools/stand.py), both on the same Steam account, so
+// Steam can't connect them. With reframework/data/re9coop_bridge/lan.txt next to the game, the
+// lobby is local: datagrams on 127.0.0.1 between the two ports named there, nothing goes to Steam.
+// Datagram: [kind: 0 hello, 1 data][channel][payload]; a hello's payload: [in lobby][hosting][name].
+constexpr std::uint64_t kLanLobby = 4242;
+struct Lan {
+    bool on{false};
+    SOCKET sock{INVALID_SOCKET};
+    sockaddr_in peer{};
+    std::uint64_t me{0}, peer_id{0};
+    std::string name{"me"}, peer_name{"partner"};
+    ULONGLONG peer_seen{0}, next_hello{0};
+    bool peer_in_lobby{false}, peer_hosting{false};
+    std::deque<std::string> in[kMaxChannels];
+};
+Lan g_lan;
+
+bool lan_config() {
+    char exe[MAX_PATH];
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string path(exe);
+    path = path.substr(0, path.find_last_of("\\/") + 1) + "reframework\\data\\re9coop_bridge\\lan.txt";
+    std::ifstream f(path);
+    if (!f) return false;
+    int port = 0, peer = 0;
+    std::string line;
+    while (std::getline(f, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const auto k = line.substr(0, eq);
+        auto v = line.substr(eq + 1);
+        while (!v.empty() && (v.back() == '\r' || v.back() == ' ')) v.pop_back();
+        if (k == "port") port = std::atoi(v.c_str());
+        else if (k == "peer") peer = std::atoi(v.c_str());
+        else if (k == "me") g_lan.me = std::strtoull(v.c_str(), nullptr, 10);
+        else if (k == "peer_id") g_lan.peer_id = std::strtoull(v.c_str(), nullptr, 10);
+        else if (k == "name") g_lan.name = v;
+    }
+    if (port <= 0 || peer <= 0 || g_lan.me == 0 || g_lan.peer_id == 0) return false;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+    g_lan.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_lan.sock == INVALID_SOCKET) return false;
+    int buf = 8 << 20;
+    setsockopt(g_lan.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&buf), sizeof(buf));
+    setsockopt(g_lan.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&buf), sizeof(buf));
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(static_cast<u_short>(port));
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(g_lan.sock, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+        closesocket(g_lan.sock);
+        g_lan.sock = INVALID_SOCKET;
+        return false;
+    }
+    u_long nb = 1;
+    ioctlsocket(g_lan.sock, FIONBIO, &nb);
+    g_lan.peer = a;
+    g_lan.peer.sin_port = htons(static_cast<u_short>(peer));
+    g_lan.on = true;
+    return true;
+}
+
+void lan_send_raw(char kind, int channel, const char* data, size_t len) {
+    std::string d;
+    d.reserve(len + 2);
+    d.push_back(kind);
+    d.push_back(static_cast<char>(channel));
+    d.append(data, len);
+    sendto(g_lan.sock, d.data(), static_cast<int>(d.size()), 0, reinterpret_cast<const sockaddr*>(&g_lan.peer), sizeof(g_lan.peer));
+}
+
+bool lan_peer_member() {
+    if (g_st.state != State::InLobby || !g_lan.peer_in_lobby) return false;
+    if (GetTickCount64() - g_lan.peer_seen > 3000) return false;
+    return g_lan.peer_hosting != g_st.is_host; // one host, one guest
+}
+
+void lan_pump() {
+    static char buf[70000];
+    for (;;) {
+        const int n = recvfrom(g_lan.sock, buf, sizeof(buf), 0, nullptr, nullptr);
+        if (n < 2) break;
+        const int ch = static_cast<unsigned char>(buf[1]);
+        if (buf[0] == 0 && n >= 4) {
+            g_lan.peer_seen = GetTickCount64();
+            g_lan.peer_in_lobby = buf[2] != 0;
+            g_lan.peer_hosting = buf[3] != 0;
+            g_lan.peer_name.assign(buf + 4, n - 4);
+        } else if (buf[0] == 1 && ch < kMaxChannels && g_st.state == State::InLobby && g_lan.in[ch].size() < 4096) {
+            g_lan.in[ch].emplace_back(buf + 2, n - 2);
+        }
+    }
+}
+
+void lan_tick() {
+    lan_pump();
+    const auto now = GetTickCount64();
+    if (now >= g_lan.next_hello) {
+        g_lan.next_hello = now + 500;
+        std::string h;
+        h.push_back(g_st.state == State::InLobby ? 1 : 0);
+        h.push_back(g_st.is_host ? 1 : 0);
+        h += g_lan.name;
+        lan_send_raw(0, 0, h.data(), h.size());
+    }
+    if (g_st.state != State::InLobby) return;
+    std::vector<Member> list{{g_lan.me, g_lan.name}};
+    if (lan_peer_member()) list.push_back({g_lan.peer_id, g_lan.peer_name});
+    g_st.members = std::move(list);
+    g_st.owner = g_st.is_host ? g_lan.me : g_lan.peer_id;
+}
+
+void lan_enter(bool hosting) {
+    g_st.state = State::InLobby;
+    g_st.is_host = hosting;
+    g_st.lobby = kLanLobby;
+    g_st.error.clear();
+    for (auto& q : g_lan.in) q.clear();
+    lan_tick();
+}
 
 void* mm() { return g_api.SteamMatchmaking(); }
 void* fr() { return g_api.SteamFriends(); }
@@ -299,7 +423,14 @@ const char* state_name(State s) {
 
 bool init() {
     std::lock_guard _{g_mx};
-    if (g_inited) return g_api.loaded;
+    if (g_inited) return g_api.loaded || g_lan.on;
+    if (lan_config()) {
+        g_inited = true;
+        g_st.steam = true;
+        g_st.me = g_lan.me;
+        g_st.error.clear();
+        return true;
+    }
     const char* missing = nullptr;
     if (!steam::load_api(g_api, &missing)) {
         // steam_api64.dll may not be initialised yet; try again on the next call
@@ -337,6 +468,7 @@ void shutdown() {
 void tick() {
     std::lock_guard _{g_mx};
     if (!g_inited && !init()) return;
+    if (g_lan.on) return lan_tick();
     poll_call();
     if (g_st.state != State::InLobby) return;
     const auto now = GetTickCount64();
@@ -356,6 +488,10 @@ void tick() {
 bool host(int max_members, int lobby_type) {
     std::lock_guard _{g_mx};
     if (!g_inited && !init()) return false;
+    if (g_lan.on) {
+        lan_enter(true);
+        return true;
+    }
     if (g_st.state == State::InLobby) leave();
     if (g_pending != Pending::None) return false;
     g_st.error.clear();
@@ -374,6 +510,10 @@ bool join(std::uint64_t lobby) {
     std::lock_guard _{g_mx};
     if (!g_inited && !init()) return false;
     if (lobby == 0) return false;
+    if (g_lan.on) {
+        lan_enter(false);
+        return true;
+    }
     if (g_st.state == State::InLobby) leave();
     if (g_pending != Pending::None) return false;
     g_st.error.clear();
@@ -390,6 +530,13 @@ bool join(std::uint64_t lobby) {
 void leave() {
     std::lock_guard _{g_mx};
     if (!g_inited) return;
+    if (g_lan.on) {
+        g_st.state = State::Idle;
+        g_st.is_host = false;
+        g_st.lobby = g_st.owner = 0;
+        g_st.members.clear();
+        return;
+    }
     if (g_st.lobby != 0) g_api.LeaveLobby(mm(), g_st.lobby);
     clear_lobby();
     g_call = steam::k_uAPICallInvalid;
@@ -400,7 +547,7 @@ void leave() {
 
 bool invite_overlay() {
     std::lock_guard _{g_mx};
-    if (!g_inited || g_st.state != State::InLobby) return false;
+    if (!g_inited || g_st.state != State::InLobby || g_lan.on) return false;
     g_api.ActivateGameOverlayInviteDialog(fr(), g_st.lobby);
     return true;
 }
@@ -409,6 +556,12 @@ std::vector<FriendLobby> friends_in_game() {
     std::lock_guard _{g_mx};
     std::vector<FriendLobby> out;
     if (!g_inited && !init()) return out;
+    if (g_lan.on) {
+        if (GetTickCount64() - g_lan.peer_seen < 3000) {
+            out.push_back({g_lan.peer_id, g_lan.peer_name, g_lan.peer_in_lobby && g_lan.peer_hosting ? kLanLobby : 0});
+        }
+        return out;
+    }
     const auto app = g_api.GetAppID(ut());
     const int n = g_api.GetFriendCount(fr(), steam::k_EFriendFlagImmediate);
     for (int i = 0; i < n; ++i) {
@@ -431,6 +584,7 @@ Status status() {
 std::string my_name() {
     std::lock_guard _{g_mx};
     if (!g_inited && !init()) return "";
+    if (g_lan.on) return g_lan.name;
     const char* n = g_api.GetPersonaName(fr());
     return n ? n : "";
 }
@@ -451,6 +605,14 @@ int send(const std::string& data, bool reliable, int channel, std::uint64_t to) 
         ++count;
     }
     if (!g_inited || g_st.state != State::InLobby) return count;
+    if (g_lan.on) {
+        // one datagram each: the biggest message (a 60 KB piece of the host's world) fits
+        if (data.size() <= 65000 && lan_peer_member() && (to == 0 || to == g_lan.peer_id)) {
+            lan_send_raw(1, channel, data.data(), data.size());
+            ++count;
+        }
+        return count;
+    }
     const int flags = (reliable ? steam::k_nSteamNetworkingSend_Reliable
                                 : steam::k_nSteamNetworkingSend_Unreliable | steam::k_nSteamNetworkingSend_NoNagle)
         | steam::k_nSteamNetworkingSend_AutoRestartBrokenSession;
@@ -478,6 +640,15 @@ std::vector<Packet> recv(int channel, int max) {
         }
     }
     if (!g_inited || g_st.state != State::InLobby) return out;
+    if (g_lan.on) {
+        lan_pump();
+        auto& q = g_lan.in[channel];
+        while (!q.empty() && (int)out.size() < max) {
+            out.push_back({g_lan.peer_id, std::move(q.front())});
+            q.pop_front();
+        }
+        return out;
+    }
     steam::SteamNetworkingMessage_t* msgs[64];
     while ((int)out.size() < max) {
         const int want = std::min(64, max - (int)out.size());

@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.0
+# RE9 Co-op (online) — v0.12.1
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -291,6 +291,12 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   played, no crash. Interactions: 49 replayable triggers indexed in Chap3_02 (7 switch on, 7 off, 35
   crates); a partner's switch-on from our own state replayed (the switch changed), the same from
   another state skipped; our own switch-off sent with its earlier state.
+- v0.12.1, two real games on one PC (tools/stand.py: a second game folder of hard links, the network
+  plugin's LAN test mode instead of Steam, lowest graphics in a window): the host continued from a save
+  and opened the lobby, the guest joined from its title screen and loaded the host's world (752 KB),
+  both built the other's character. Before the fix below the guest's sync check found 442 of 684 gimmicks
+  different (every false the host sent had come out true); after it: 0 story flows, 0 gimmicks, 0 items,
+  0 enemies different, each copy of the other player with 68 of 68 joints matched.
 - Not yet: a real two-PC session, a whole boss fight from its entrance to its death.
 
 ## How it works
