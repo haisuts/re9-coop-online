@@ -177,6 +177,47 @@ end
 dev.saves = {}
 local skipped = false
 local T_SSM = sdk.find_type_definition("app.SaveServiceManager")
+-- A skipped save is still reported as done: its requester waits for the request's _SaveFinished (the
+-- clear screen's "Next" did nothing, a skipped request never finishing), so it gets one, a frame later,
+-- with Success, and the request call says it was taken. Nothing is written.
+dev.save_finish = {}
+local function finish_later(arg)
+    local ok, fin = pcall(function()
+        local nv = sdk.to_valuetype(arg, "System.Nullable`1<app.SavedataSaveRequestArgs>")
+        if not nv:get_field("_HasValue") then return nil end
+        return nv:get_field("_Value"):get_field("_SaveFinished")
+    end)
+    if ok and fin then
+        local okr, held = pcall(fin.add_ref, fin)
+        if okr and held then fin = held end
+        dev.save_finish[#dev.save_finish + 1] = { fin = fin, t = os.clock() + 0.2 }
+    end
+end
+re.on_pre_application_entry("UpdateBehavior", function()
+    if #dev.save_finish == 0 then return end
+    local t = os.clock()
+    local keep = {}
+    for _, e in ipairs(dev.save_finish) do
+        if t < e.t then
+            keep[#keep + 1] = e
+        else
+            local once = _G.re9coop_save_done or {}
+            _G.re9coop_save_done = once
+            local a = e.fin:get_address()
+            if not (once[a] and t - once[a] < 5) then
+                once[a] = t
+                local ok, err = pcall(function()
+                    local info = sdk.create_instance("app.SavedataSaveResultInfo"):add_ref()
+                    info:call("set_Result", 1) -- Success
+                    e.fin:call("Invoke", info)
+                end)
+                log.info("[re9coop devbridge] skipped save reported done: " .. tostring(ok) .. (ok and "" or (" " .. tostring(err))))
+            end
+            pcall(e.fin.release, e.fin)
+        end
+    end
+    dev.save_finish = keep
+end)
 for _, sig in ipairs({
     "requestSave(app.SaveSlotCategory, app.SaveSlotSelectionMethod, System.Nullable`1<app.SavedataSaveRequestArgs>)",
     "requestSave(app.SaveSlotCategory, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
@@ -190,6 +231,7 @@ for _, sig in ipairs({
         log.info("[re9coop devbridge] no method " .. sig)
     else
         local short = sig:match("^[^(]+") .. "(" .. sig:match("%(([%w%.]+)")
+        local last = 2 + m:get_num_params() -- the request's arguments (System.Nullable`1<app.SavedataSaveRequestArgs>)
         sdk.hook(m, function(args)
             local a = sdk.to_int64(args[3]) & 0xFFFFFFFF
             local b = sdk.to_int64(args[4]) & 0xFFFFFFFF
@@ -199,11 +241,14 @@ for _, sig in ipairs({
             dev.saves[#dev.saves + 1] = line
             log.info("[re9coop devbridge] save " .. line)
             skipped = block
-            if block then return sdk.PreHookResult.SKIP_ORIGINAL end
+            if block then
+                finish_later(args[last])
+                return sdk.PreHookResult.SKIP_ORIGINAL
+            end
         end, function(retval)
             if skipped then
                 skipped = false
-                return sdk.to_ptr(0)
+                return sdk.to_ptr(1)
             end
             return retval
         end)

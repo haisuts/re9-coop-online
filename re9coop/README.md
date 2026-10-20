@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.5
+# RE9 Co-op (online) — v0.12.6
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -26,7 +26,9 @@ from it is used.
   the mod's menu then shows "Free stuck doors"; press it as the host (or alone), then save.
 - **Story steps (experimental)**: every level-flow step either of you takes is taken by the other
   game too; a joining guest gets the host's chapter progress.
-- **Chapters**: when the host moves on, the guest's game follows 5 s later (countdown on screen).
+- **Chapters**: when the host moves on, the guest's game follows 5 s later (countdown on screen),
+  into the host's own scene (several scenes share a chapter), the last battle, found footage and the
+  ending's scenes and credits included.
 - **Locks, keys, puzzles, switches — live**: a lock one player opens (with a key or otherwise) opens
   in the partner's game too, right away, without any scene for the partner's character; items placed
   into puzzle slots count for both; switch positions and other gimmick states follow as soon as the
@@ -51,7 +53,8 @@ from it is used.
 - **After a game over**: the player who died continues from their last save as usual; the partner who
   stayed sends them the chapter as it is now (story steps, locks and puzzles, item box, recipes, the
   pickups made), so their world catches up instead of the other one going back.
-- **Cutscenes together**: a cutscene one of you skips is skipped for the other too.
+- **Cutscenes together**: a story cutscene that starts in one game plays in the other too, and one
+  that one of you skips is skipped for the other too.
 - **Where your partner is**: on the game's map (a dot with their name, "above" / "below" for another
   floor) and, when they're out of sight, their name and distance at the edge of the screen.
 - **Enemy drops for both**: what an enemy leaves is there in both games, at the same spot; whoever
@@ -326,9 +329,13 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   host's game only: in the guest's game too, to the guest when the host went down, the hits on the
   copy counted (C510: 25000, 17500, 10000, 2500, dead), dead in both games. The host killed for real:
   their zombie went to the guest within 1.5 s.
-- Not yet: a real two-PC session; boss fights started by their own entrance scenes (on the stand they
-  were spawned by hand, and only C510 moved and fought without its scene); Chap5_03 to Chap5_05 and the
-  bosses there (a test jump can't load them).
+- v0.12.6 on the stand: the last boss after its own entrance scene fought the host, then the guest
+  when the host was down; hit through the guest's copy down to its death, its death scene, phase two,
+  the ending, the credits and the results screen in both games; the other ending; a co-op playthrough
+  from New Game (the guest with a save of their own joined from the title, 0 differences a minute
+  later); a guest joining a host in another chapter (Leon's Chap4_10) came in as Leon.
+- Not yet: a real two-PC session; in the last battle's second phase the coils the guest works in their
+  own game may not count for the host's (the host should work them).
 
 ## How it works
 - `re9coop_net.dll` (REFramework plugin, C++): uses the game's own `steam_api64.dll` — a friends-only
@@ -397,9 +404,7 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   in the other; their light switch is shared.
 - An enemy attacks the player whose game runs it: the nearer one; a boss the one it started with,
   until that player is down or has left it (20 m off, the other one within 8 m), then the other.
-- Story sharing is experimental: a step can start a cutscene or move the other player. After the guest
-  follows into a new chapter, 1 to 3 of its ~640 story flows can stay ahead of the host's (its own
-  chapter load set them; the host's catch-up moves flows on, never back).
+- Story sharing is experimental: a step can start a cutscene or move the other player.
 - Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
   the first through the network code). The first real two-PC session may still find problems — please
   send `re2_framework_log.txt` from both games.

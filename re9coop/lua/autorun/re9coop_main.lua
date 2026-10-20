@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.5"
-local PROTO = 13
+local VERSION = "0.12.6"
+local PROTO = 14
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -353,7 +353,7 @@ local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
     CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36, CHECK_REQ = 37, CHECK = 38,
-    BODY_SOUND = 39, DOOR_ANGLE = 41, GIM_JOINT = 42 }
+    BODY_SOUND = 39, DOOR_ANGLE = 41, GIM_JOINT = 42, SCENE = 43, CUT_PLAY = 44 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 -- 512 (written as a number where used: the main chunk is at its 200 locals): off the ground, falling or
@@ -972,7 +972,7 @@ local function on_ctrl(from, data)
         ext.recipes_ctrl(from, kind, data)
     elseif kind == MSG.LOADED and ext.loaded_ctrl then
         ext.loaded_ctrl(from, kind, data)
-    elseif kind == MSG.CUTSCENE and ext.cut_ctrl then
+    elseif (kind == MSG.CUTSCENE or kind == MSG.CUT_PLAY) and ext.cut_ctrl then
         ext.cut_ctrl(from, kind, data)
     elseif (kind == MSG.DROP or kind == MSG.DROP_TAKEN) and ext.drops_ctrl then
         ext.drops_ctrl(from, kind, data)
@@ -980,6 +980,9 @@ local function on_ctrl(from, data)
         ext.fresh_ctrl(from, kind, data)
     elseif (kind == MSG.CHECK_REQ or kind == MSG.CHECK) and ext.check_ctrl then
         ext.check_ctrl(from, kind, data)
+    elseif kind == MSG.SCENE then
+        local _, chapter, scene = string.unpack("<Bs1s1", data)
+        p.scene, p.scene_chapter, p.scene_t = scene, chapter, now()
     end
 end
 
@@ -1605,7 +1608,9 @@ local function enemies_tick(t_now)
                     pcall(hp.call, hp, "set_Invincible", false)
                 end
                 local cur = hp and hp:call("get_CurrentHitPoint") or 0
-                apply_damage(e, 0, math.max(1, cur) + 100, false, true)
+                -- a plain lethal hit first (the last flag set kills outright, past the death the game
+                -- plays from a hit: a boss's death scene didn't start), the outright kill if it stands
+                apply_damage(e, 0, math.max(1, cur) + 100, false, st.kill_tries > 2)
             end
             if st.kill_tries >= 8 or e.ctx:call("get_IsDead") or not e.ctx:call("get_IsSpawn") then st.killed = true end
         end
@@ -3115,11 +3120,64 @@ local function apply_story(data, from)
     story.stats.applied = story.stats.applied + 1
 end
 
+-- The game scene we're in: several scenes share a chapter folder (Chap3_03, Chap3_324 and Chap3_04
+-- play in Chap3_0304), each with its own start. The jump's target (_JumpTargetMainSceneName): the
+-- controller's _CurrentMainSceneName still names the scene before for a while after we're in.
+story.scene_name = function()
+    local ok, name = pcall(function()
+        local c = sdk.get_managed_singleton("app.MainGameFlowManager"):get_field("_CurrentController")
+        local t = c:get_field("_JumpTargetMainSceneName")
+        if type(t) == "string" and t ~= "" then return t end
+        return c:get_field("_CurrentMainSceneName")
+    end)
+    return ok and type(name) == "string" and name or ""
+end
+
+-- does that scene play in that folder? (its own name, or a folder in its _ActivateTable entry)
+story.scene_fits = function(scene, folder)
+    if scene == folder then return true end
+    local ok, yes = pcall(function()
+        local d = sdk.get_managed_singleton("app.MainGameFlowManager"):get_field("_CurrentController"):get_field("_ActivateTable")
+        local list = d:call("get_Item", scene)
+        for i = 0, list:call("get_Count") - 1 do
+            if list:call("get_Item", i) == folder then return true end
+        end
+        return false
+    end)
+    return ok and yes
+end
+
+-- a scene that needs its own kind of jump: the last battle's (in the controller's
+-- _BattleReadyTargetScene; a plain jump there hangs on a black load screen) and found footage
+story.battle_ready = function(name)
+    local ok, yes = pcall(function()
+        local list = sdk.get_managed_singleton("app.MainGameFlowManager"):get_field("_CurrentController"):get_field("_BattleReadyTargetScene")
+        for i = 0, list:call("get_Count") - 1 do
+            if list:call("get_Item", i) == name then return true end
+        end
+        return false
+    end)
+    return ok and yes
+end
+
+-- one of the main game's scenes (a key of the controller's _ActivateTable: chapters, found footage,
+-- ClearGame), not the title
+story.is_scene = function(name)
+    if name == nil or name == "" then return false end
+    local ok, yes = pcall(function()
+        return sdk.get_managed_singleton("app.MainGameFlowManager"):get_field("_CurrentController"):get_field("_ActivateTable"):call("ContainsKey", name)
+    end)
+    return ok and yes == true
+end
+
 local function jump_to_chapter(name)
     local mg = sdk.get_managed_singleton("app.MainGameFlowManager")
     local lf = level_flow()
     if mg == nil or lf == nil then return false end
+    local battle, footage = story.battle_ready(name), name:match("^FF_") ~= nil
     ext.later(function()
+        if battle then pcall(mg.call, mg, "set_IsBattleReadyJump(System.Boolean)", true) end
+        if footage then pcall(mg.call, mg, "setFoundFootageJump(System.Boolean)", true) end
         pcall(mg.call, mg, "setOverrideNextJumpScene", name)
         pcall(lf.call, lf, "requestGameJump")
     end)
@@ -3146,6 +3204,33 @@ local function host_peer()
     return st_net and st_net.owner ~= st_net.me and peers[st_net.owner] or nil
 end
 
+story.jump = function(name) return jump_to_chapter(name) end
+
+-- Our scene goes to the partner every 2 s (from the session tick: also with no player of ours). A host
+-- in a scene with no player (the ending's Chap5_05, ClearGame) sends no poses, so the chapter follow
+-- above never sees it: the guest goes by the host's scene (also when the guest has no player itself).
+story.scene_tick = function(t_now)
+    if t_now < (story.scene_t or 0) then return end
+    story.scene_t = t_now + 2
+    local mine = story.scene_name()
+    send_ctrl(string.pack("<Bs1s1", MSG.SCENE, me.chapter, mine))
+    local hp = host_peer()
+    if not cfg.follow_host or hp == nil or hp.scene == nil or t_now - (hp.scene_t or 0) > 5 then story.bare = nil return end
+    local host_bare, me_bare = hp.scene_chapter == "", me.chapter == "" or me.go == nil
+    if not (host_bare or me_bare) or hp.scene == mine or not story.is_scene(hp.scene) or not story.is_scene(mine) or in_cutscene() then
+        story.bare = nil
+        return
+    end
+    local b = story.bare
+    if b == nil or b.scene ~= hp.scene then
+        story.bare = { scene = hp.scene, at = t_now + 10 }
+    elseif t_now >= b.at then
+        b.at = t_now + 40
+        say("the host is in %s: following", hp.scene)
+        jump_to_chapter(hp.scene)
+    end
+end
+
 go_to_partner_chapter = function()
     local p = partner_to_follow and partner_to_follow()
     if p == nil or p.chapter == "" then return "no partner" end
@@ -3170,7 +3255,7 @@ story_ctrl = function(from, kind, data)
 end
 
 story_reset = function()
-    story.expect, story.out, story.full_done_for, story.wait = {}, {}, nil, {}
+    story.expect, story.out, story.full_done_for, story.wait, story.again = {}, {}, nil, {}, nil
 end
 
 story_late = function(t_now)
@@ -3190,10 +3275,29 @@ story_late = function(t_now)
         end
         say("sent %d story steps to your partner", n)
         story.stats.sent = story.stats.sent + n
+        -- again 15 s and 45 s later: the partner's own chapter load and opening scene can still move a
+        -- flow after the first catch-up came in (one stayed at 50 here at 100, not through
+        -- setProgressiveNumber, so nothing was sent); still only on, never back
+        story.again = { pid = partner.id, at = { t_now + 15, t_now + 45 } }
         if ext.send_pickups then
             local np = ext.send_pickups(partner.id)
             if np > 0 then say("sent %d pickups made here to your partner", np) end
         end
+    end
+    local again = story.again
+    if again and partner and partner.id == again.pid and partner.chapter == me.chapter and t_now >= again.at[1] then
+        table.remove(again.at, 1)
+        if #again.at == 0 then story.again = nil end
+        local n = 0
+        for hash, value in pairs(progress_list()) do
+            if value ~= 0 then
+                send_ctrl(string.pack("<Bs1I4i4", MSG.STORY_FWD, me.chapter, hash, value), partner.id)
+                n = n + 1
+            end
+        end
+        story.stats.sent = story.stats.sent + n
+    elseif again and (partner == nil or partner.id ~= again.pid) then
+        story.again = nil
     end
     if #story.wait > 0 and (ext.settled == nil or ext.settled()) then
         local wait = story.wait
@@ -3218,7 +3322,13 @@ story_late = function(t_now)
             f.target, f.at, f.tries = hp.chapter, t_now + 5, 0
             say("the host is in %s: following in 5 s", hp.chapter)
         elseif t_now >= f.at then
-            jump_to_chapter(chapter_jump_name(f.target, f.tries))
+            -- the host's own scene first (the folder alone may hold several), then the folder's names
+            local scene = hp.scene_chapter == hp.chapter and hp.scene or ""
+            if scene ~= "" and f.tries % 3 == 0 and story.scene_fits(scene, hp.chapter) then
+                jump_to_chapter(scene)
+            else
+                jump_to_chapter(chapter_jump_name(f.target, f.tries))
+            end
             f.tries = f.tries + 1
             f.at = t_now + 25 -- if we're still not there by then, try the other name
         end
@@ -3733,8 +3843,35 @@ sdk.hook(sdk.find_type_definition(T_MEDIATOR):get_method("skip(System.Object)"),
     end
 end, nil)
 
-ext.cut_ctrl = function(_, _, data)
-    if not cfg.skip_together or not world_shared() then return end
+-- A story cutscene (started by a level flow object, "Simple_CutScene_Progress...") that plays in one
+-- game plays in the other too. The partner's game gets the flow step that starts it, its object comes
+-- on, but its tree never runs (the last boss's death scene played in the host's game only, whoever
+-- ran the boss): the game that plays it sends its id, the other plays it with the same arguments 3 s
+-- later unless it has played it itself by then. Its flow steps come from the game that played it.
+local M_PLAY = sdk.find_type_definition(T_MEDIATOR):get_method("play(app.TimelineEventDefine.ID, System.Int32, System.String, System.Boolean, "
+    .. "app.cs1cnm.EventHandler`2<System.Object,app.TimelineEventMediatorRequestArgs>, app.cs1cnm.EventHandler`2<System.Object,app.TimelineEventMediatorRequestArgs>)")
+cut.played = {} -- event id -> when it started here
+if M_PLAY then
+    sdk.hook(M_PLAY, function(args)
+        local id = int32(sdk.to_int64(args[3]))
+        cut.played[id] = now()
+        if cut.mirroring or not world_shared() then return end
+        local ok, label = pcall(function() return sdk.to_managed_object(args[5]):call("ToString") end)
+        if ok and type(label) == "string" and label:find("CutScene") and #label < 200 then
+            send_ctrl(string.pack("<Bs1i4i4s2B", MSG.CUT_PLAY, me.chapter, id, int32(sdk.to_int64(args[4])), label, sdk.to_int64(args[6]) & 1))
+            cut.stats.sent = cut.stats.sent + 1
+        end
+    end, nil)
+end
+
+ext.cut_ctrl = function(_, kind, data)
+    if not world_shared() then return end
+    if kind == MSG.CUT_PLAY then
+        local _, chapter, id, n, label, b = string.unpack("<Bs1i4i4s2B", data)
+        if chapter == me.chapter then cut.mirror = { id = id, n = n, label = label, b = b == 1, at = now() + 3, sent = now() } end
+        return
+    end
+    if not cfg.skip_together then return end
     local _, chapter, id = string.unpack("<Bs1i4", data)
     if chapter == me.chapter then cut.pending, cut.until_t = id, now() + 5 end
 end
@@ -3742,6 +3879,21 @@ end
 -- inside the game's GUI update
 ext.cut_gui = function()
     local t = now()
+    local mr = cut.mirror
+    if mr and t >= mr.at then
+        cut.mirror = nil
+        local m = mediator()
+        local mine = cut.played[mr.id]
+        if m and me.go and t - mr.at < 12 and not (mine and mine >= mr.sent - 10) and current_event(m) ~= mr.id then
+            cut.mirroring = true
+            local ok = pcall(M_PLAY.call, M_PLAY, m, mr.id, mr.n, mr.label, mr.b, nil, nil)
+            cut.mirroring = false
+            if ok then
+                cut.stats.mirrored = (cut.stats.mirrored or 0) + 1
+                say("playing the cutscene your partner sees")
+            end
+        end
+    end
     if cut.pending then
         local m = mediator()
         if t > cut.until_t then
@@ -4398,6 +4550,21 @@ function W.decode(data)
             if o then objs[id] = o:add_ref() else missing[#missing + 1] = types[node[1]] end
         end
     end
+    -- an array field that was null on the host's side comes as an empty array (as a save the game
+    -- loads itself does): a new game's B800 backup had SpawnBanInfos null, and CharacterManager's
+    -- restore threw on it again and again (the guest's load never ended)
+    local empty_cache = {}
+    local function empty_array(ti)
+        local n = normalize(types[ti] or "")
+        if n:sub(-2) ~= "[]" then return nil end
+        local a = empty_cache[n]
+        if a == nil then
+            local ok, arr = pcall(sdk.create_managed_array, n:sub(1, -3), 0)
+            a = ok and arr and arr:add_ref() or false
+            empty_cache[n] = a
+        end
+        return a or nil
+    end
     -- a struct with references as a ValueType
     local function build_struct(ti, vals)
         local std = td_of(ti)
@@ -4412,7 +4579,8 @@ function W.decode(data)
             elseif fd[2] == "s" then
                 if v then pcall(vt.set_field, vt, fd[1], sdk.create_managed_string(v)) end
             else
-                if v then pcall(vt.set_field, vt, fd[1], objs[v]) end
+                local x = v and objs[v] or empty_array(fd[3])
+                if x then pcall(vt.set_field, vt, fd[1], x) end
             end
         end
         return vt
@@ -4452,7 +4620,7 @@ function W.decode(data)
                     elseif fd[2] == "s" then
                         pcall(o.set_field, o, fd[1], v and sdk.create_managed_string(v) or nil)
                     else
-                        pcall(o.set_field, o, fd[1], v and objs[v] or nil)
+                        pcall(o.set_field, o, fd[1], (v and objs[v]) or empty_array(fd[3]))
                     end
                 end
             end
@@ -4603,9 +4771,28 @@ local function hook_restores()
         if m and not WORLD_KEEP[key] then
             sdk.hook(m, function(args)
                 local sub = fresh.world_on and fresh.world and fresh.world[key]
+                -- a handler the game restores again and again (until it says it's done) never takes
+                -- the host's data: CharacterManager with a world from another chapter (the host's new
+                -- game, our save in Chap3_02) was asked every frame and the load never ended. After
+                -- 20 tries in one load it gets our own (the rest of the world stays the host's).
+                if sub and fresh.restore_n then
+                    local n = (fresh.restore_n[key] or 0) + 1
+                    fresh.restore_n[key] = n
+                    if n > 20 then
+                        sub = nil
+                        if n == 21 then
+                            fresh.own_keys = fresh.own_keys or {}
+                            fresh.own_keys[#fresh.own_keys + 1] = key
+                        end
+                    end
+                end
                 if sub then
                     args[3] = sdk.to_ptr(sub)
                     fresh.subs = fresh.subs + 1
+                end
+                -- which handlers restored what, in order (said when the load ends or gives up)
+                if fresh.world_on and fresh.restored and #fresh.restored < 80 then
+                    fresh.restored[#fresh.restored + 1] = key .. (sub and "" or "(own)")
                 end
             end, nil)
         end
@@ -4618,6 +4805,7 @@ local function start_world_load()
     if tfc == nil or fresh.world == nil then return false end
     hook_restores()
     fresh.world_on, fresh.subs, fresh.via, fresh.load_go = true, 0, "world", me.go_addr
+    fresh.restored, fresh.restore_n, fresh.own_keys = {}, {}, nil
     tfc:call("onContinue")
     return true
 end
@@ -4774,10 +4962,50 @@ do
     local function post(retval)
         if skipped then
             skipped = false
-            return sdk.to_ptr(0)
+            return sdk.to_ptr(1) -- taken (its _SaveFinished comes below)
         end
         return retval
     end
+    -- a skipped save still reports done: its requester waits for the request's _SaveFinished (the
+    -- clear screen's "Next" did nothing after a skipped save; a typewriter would wait the same way):
+    -- Success a frame later, nothing written
+    local finish = {}
+    local function finish_later(arg)
+        local ok, fin = pcall(function()
+            local nv = sdk.to_valuetype(arg, "System.Nullable`1<app.SavedataSaveRequestArgs>")
+            if not nv:get_field("_HasValue") then return nil end
+            return nv:get_field("_Value"):get_field("_SaveFinished")
+        end)
+        if ok and fin then
+            local okr, held = pcall(fin.add_ref, fin)
+            if okr and held then fin = held end
+            finish[#finish + 1] = { fin = fin, t = now() + 0.2 }
+        end
+    end
+    re.on_pre_application_entry("UpdateBehavior", function()
+        if #finish == 0 then return end
+        local t, keep = now(), {}
+        for _, e in ipairs(finish) do
+            if t < e.t then
+                keep[#keep + 1] = e
+            else
+                -- once per request (the test stand's save guard may report the same one)
+                local once = _G.re9coop_save_done or {}
+                _G.re9coop_save_done = once
+                local a = e.fin:get_address()
+                if not (once[a] and os.clock() - once[a] < 5) then
+                    once[a] = os.clock()
+                    pcall(function()
+                        local info = sdk.create_instance("app.SavedataSaveResultInfo"):add_ref()
+                        info:call("set_Result", 1) -- app.SaveServiceProcessResult.Success
+                        e.fin:call("Invoke", info)
+                    end)
+                end
+                pcall(e.fin.release, e.fin)
+            end
+        end
+        finish = keep
+    end)
     for _, sig in ipairs({
         "requestSave(app.SaveSlotCategory, app.SaveSlotSelectionMethod, System.Nullable`1<app.SavedataSaveRequestArgs>)",
         "requestSave(app.SaveSlotCategory, System.Int32, System.Nullable`1<app.SavedataSaveRequestArgs>)",
@@ -4788,11 +5016,13 @@ do
         local m = T_SSM:get_method(sig)
         local by_category = sig:find("SaveSlotCategory", 1, true) ~= nil
         if m then
+            local last = 2 + m:get_num_params() -- the request's arguments
             sdk.hook(m, function(args)
                 skipped = false
                 if not fresh.active then return end
                 if by_category and (sdk.to_int64(args[3]) & 0xFFFFFFFF) == CAT_SYSTEM then return end
                 skipped = true
+                finish_later(args[last])
                 return sdk.PreHookResult.SKIP_ORIGINAL
             end, post)
         end
@@ -4961,6 +5191,8 @@ ext.fresh_late = function(t_now)
         fresh.world_on = false
         fresh.phase, fresh.t = "arrived", t_now
         say("in the host's world (%d parts of it loaded)", fresh.subs)
+        log.info(TAG .. "restored: " .. table.concat(fresh.restored or {}, ", "))
+        if fresh.own_keys then say("from your own save instead (the host's wouldn't load): %s", table.concat(fresh.own_keys, ", ")) end
     end
     if fresh.phase == "await_world" and t_now - fresh.t > 40 and fresh.play then
         -- no world came: the new game in the host's chapter instead
@@ -4974,6 +5206,7 @@ ext.fresh_late = function(t_now)
     if fresh.phase == "loading_world" and me.go == nil and t_now - fresh.t > 120 then
         fresh.active, fresh.phase, fresh.world_on = false, nil, false
         say("the host's world didn't load: trying again")
+        log.info(TAG .. string.format("restored before it stopped (%d): %s", fresh.subs or 0, table.concat(fresh.restored or {}, ", ")))
     end
     local f = sdk.get_managed_singleton("app.FadeManager")
     local fading = f and f:call("isAnyFadeOut") and t_now - (me.loaded_at or 0) < 30
@@ -5807,6 +6040,7 @@ local function sync_members(st, t_now)
         session.next_ping = t_now + 2
         send_ctrl(string.pack("<Bd", MSG_PING, t_now))
     end
+    if story.scene_tick and #ids > 0 then pcall(story.scene_tick, t_now) end
 end
 
 local function tick_session(t_now)

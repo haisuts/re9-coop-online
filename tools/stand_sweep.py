@@ -58,10 +58,16 @@ def front(game):
     return h
 
 
+# the game's own skip (what the pause menu's "skip" calls), only while a skippable cutscene plays: keys
+# (Esc, hold F) opened the pause menu when the cutscene had just ended, and F picked "Restart"
+SKIP = ("dev.op = function() local m = sdk.get_managed_singleton('app.TimelineEventMediator') "
+        "if m and m:call('get_IsPlayingCutScene') and m:call('get_IsSkippable') then return tostring(m:call('skip(System.Object)', m)) end "
+        "return 'nothing to skip' end return 1")
+
+
 def skip_cutscene(game):
-    if front(game):
-        subprocess.run(["um", "win", "drive", "--proc", "re9", "sleep 200", "key 0x1B", "sleep 700", "hold 0x46 3500",
-                        "sleep 800"], capture_output=True, shell=True)
+    bridge(game, GUI_OP, 5)
+    bridge(game, SKIP, 5)
 
 
 def shot(game, path):

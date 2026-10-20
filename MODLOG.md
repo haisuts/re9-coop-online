@@ -935,6 +935,47 @@ way round; drawers and cabinets open without their movement.
   REFramework menu closed at start (it took the input); the second game's revive setting had been
   left off by an earlier test.
 
+## v0.12.6 (2026-10-20) — the whole game on the stand: the finale, both endings, a new game together
+
+- The game's scene tables (MainGameFlowController: _NextSceneTable, _ActivateTable,
+  _FoundFootageSceneTable, _BattleReadyTargetScene): the story order 1_00 1_01 1_10 3_01 3_10 3_02 3_20
+  3_03 3_324 3_04 3_40 3_05 3_06 4_00 4_10 4_20 4_30 4_40 4_50 5_10 5_02, then a branch: 5_03 5_05 or
+  5_04, ClearGame. Several scenes play in one chapter folder (Chap3_03 / 3_324 / 3_04 in Chap3_0304,
+  4_10 / 4_20 in Chap4_1020, 4_40 / 4_50 in Chap4_4050): the guest followed the folder's name and got
+  another scene (Chap3_03 for the host's Chap3_04), with other flows. Now each game sends its scene
+  (MSG.SCENE every 2 s, from the session tick: also with no player; _JumpTargetMainSceneName, the
+  current name lags) and the guest jumps to the host's scene when it fits the folder. The last battle
+  (Chap5_03, a battle-ready scene) gets set_IsBattleReadyJump (a plain jump hung on a black screen),
+  found footage (FF_01, FF_02: the names are upper case) setFoundFootageJump. A host in a scene with no
+  player of its own (the ending's Chap5_05, ClearGame) sends no poses: the guest goes by the scene.
+- The host's whole-chapter story catch-up again 15 s and 45 s later: the guest's own load and opening
+  scene moved flows after the first one, not through setProgressiveNumber. With both: 0 story flows,
+  0 gimmicks, 0 items, 0 enemies different a minute after each scene change (Chap3_04, 3_324, 4_20, 4_50).
+- Story cutscenes for both: a scene a level flow object starts (Simple_CutScene_Progress...) played in
+  the host's game only: the guest's game got the flow step, the object came on, its tree never ran
+  (the last boss's death scene, whoever ran the boss). The game that plays one sends its id
+  (TimelineEventMediator.play, MSG.CUT_PLAY), the other plays it with the same arguments 3 s later
+  unless it has played it itself by then.
+- The death sync's lethal hit is a plain one first (the outright-kill flag skips the death a hit plays).
+- Skipped saves report done: the guest in a co-op playthrough skips its game-slot saves (and the stand's
+  guard all saves), but the requester waits for the request's _SaveFinished: the clear screen's "Next"
+  did nothing (a typewriter would wait the same way). Now the request says it was taken and its
+  _SaveFinished gets Success a frame later; nothing is written.
+- A guest with a save of their own joining a host in another state: CharacterManager's restore threw on
+  the host's data every frame (a new game's B800 backup with SpawnBanInfos null; a save the game loads
+  itself has an empty array there) and the load never ended. Null array fields now come as empty arrays;
+  a handler restored more than 20 times in one load gets the guest's own data (and is named). Checked:
+  the host's new game, the guest (own save in Chap3_02) joined from the title in 9 s, 0 differences;
+  a host in Chap4_10 (Leon), the guest joined in 7 s as Leon, 0 story flows different.
+- On the stand: the last boss D100 after its own entrance scene (not spawned by hand) attacked the host,
+  went to the guest when the host was down; with both healed, the guest's hits on its copy 20000 ->
+  17000 -> ... -> 2000 -> dead in both, its death scene in both; phase two (D110 behind five coils,
+  Gm99_093), the ending scene, credits and ClearGame in both games together; the other ending (5_04),
+  FF_01 / FF_02 (videos: each game plays them), the prologue by New Game. Achievements stayed locked
+  (the stand's guard).
+- Test tools: the cutscene skip through TimelineEventMediator.skip (keys opened the pause menu after a
+  scene had ended, and F picked "Restart").
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).
