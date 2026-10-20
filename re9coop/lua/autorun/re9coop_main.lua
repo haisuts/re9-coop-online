@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.6"
-local PROTO = 14
+local VERSION = "0.12.7"
+local PROTO = 15
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -981,8 +981,9 @@ local function on_ctrl(from, data)
     elseif (kind == MSG.CHECK_REQ or kind == MSG.CHECK) and ext.check_ctrl then
         ext.check_ctrl(from, kind, data)
     elseif kind == MSG.SCENE then
-        local _, chapter, scene = string.unpack("<Bs1s1", data)
+        local _, chapter, scene, pos = string.unpack("<Bs1s1", data)
         p.scene, p.scene_chapter, p.scene_t = scene, chapter, now()
+        p.light_bits = #data >= pos and string.unpack("<B", data, pos) or nil
     end
 end
 
@@ -1591,9 +1592,12 @@ local function enemies_tick(t_now)
         local e = foes.index[id]
         local fresh = t_now - st.last < 1.0 and st.chapter == me.chapter
         -- the owner's enemy died: ours dies too (its AI back, lethal damage the game's own way), so
-        -- this game counts it as dead and plays the death itself. A boss keeps its own no-death on
-        -- until its last phase, and our copy never got there (the hit left it standing at 1 HP, its AI
-        -- back): cleared in the same frame as the hit, and again until it is down
+        -- this game counts it as dead and plays the death itself. An outright kill: a plain lethal
+        -- hit left zombies lying there "alive" (groaning, getting up later). A boss: a plain one first
+        -- (its death scene), and it keeps its own no-death on until its last phase, which our copy
+        -- never got to (the hit left it standing at 1 HP): cleared in the same frame, again until it is
+        -- down. The empty array for that is made once and kept: one made for each call was freed by
+        -- Lua while the game still held it (a guest's game crashed 47 s after the first one).
         if e and foes.owner[id] == false and st.flags & F_DEAD ~= 0 and not st.killed and t_now >= (st.kill_t or 0) then
             st.kill_tries, st.kill_t = (st.kill_tries or 0) + 1, t_now + 0.5
             if foes.puppets[id] then release_puppet(id, true) end
@@ -1601,16 +1605,21 @@ local function enemies_tick(t_now)
                 -- what it drops comes from the owner's game (see "enemy drops")
                 if cfg.share_drops then pcall(e.ctx.set_field, e.ctx, "<IsPermitedItemDropnOnDead>k__BackingField", false) end
                 local hp = e.ctx:call("get_HitPoint")
-                if hp then
-                    pcall(function()
-                        hp:get_field("<NoDeath>k__BackingField"):call("applyRequestHashSet(System.UInt32[])", sdk.create_managed_array("System.UInt32", 0))
-                    end)
+                local boss = foes.bosses[e.kind] == true
+                if hp and boss then
+                    if ext.empty_u32 == nil then
+                        local okm, a = pcall(sdk.create_managed_array, "System.UInt32", 0)
+                        ext.empty_u32 = okm and a and a:add_ref_permanent() or false
+                    end
+                    if ext.empty_u32 then
+                        pcall(function()
+                            hp:get_field("<NoDeath>k__BackingField"):call("applyRequestHashSet(System.UInt32[])", ext.empty_u32)
+                        end)
+                    end
                     pcall(hp.call, hp, "set_Invincible", false)
                 end
                 local cur = hp and hp:call("get_CurrentHitPoint") or 0
-                -- a plain lethal hit first (the last flag set kills outright, past the death the game
-                -- plays from a hit: a boss's death scene didn't start), the outright kill if it stands
-                apply_damage(e, 0, math.max(1, cur) + 100, false, st.kill_tries > 2)
+                apply_damage(e, 0, math.max(1, cur) + 100, false, not boss or st.kill_tries > 2)
             end
             if st.kill_tries >= 8 or e.ctx:call("get_IsDead") or not e.ctx:call("get_IsSpawn") then st.killed = true end
         end
@@ -3213,8 +3222,38 @@ story.scene_tick = function(t_now)
     if t_now < (story.scene_t or 0) then return end
     story.scene_t = t_now + 2
     local mine = story.scene_name()
-    send_ctrl(string.pack("<Bs1s1", MSG.SCENE, me.chapter, mine))
+    -- with it whether we have the flashlight and the lighter (1, 2)
+    local okb, bits = pcall(function()
+        local bb = me.flashlight and me.flashlight:get_field("_OwnerLightBlackboardUnit")
+        if bb == nil then return 0 end
+        return (bb:call("get_HasFlashLight") and 1 or 0) | (bb:call("get_HasLighter") and 2 or 0)
+    end)
+    send_ctrl(string.pack("<Bs1s1B", MSG.SCENE, me.chapter, mine, okb and bits or 0))
     local hp = host_peer()
+    -- a guest in a co-op playthrough whose game started right in the host's chapter (the host's world
+    -- didn't come) never got the flashlight there: HasFlashLight false, its switching off. The host has
+    -- it: so do we (once each time ours is missing). The same for Grace's lighter.
+    local ok_f, fr = pcall(function() return ext.fresh end)
+    if hp and hp.light_bits and ok_f and fr and fr.active and me.flashlight and okb then
+        local want = hp.light_bits & ~bits
+        if want ~= 0 then
+            ext.later(function()
+                local bb = me.flashlight and me.flashlight:get_field("_OwnerLightBlackboardUnit")
+                if bb == nil then return end
+                if want & 1 ~= 0 and not bb:call("get_HasFlashLight") then
+                    bb:call("set_HasFlashLight", true)
+                    bb:call("set_IsSelfControlFlashLight", true)
+                    bb:call("set_DisableSelfControlFlashLightByExternal", false)
+                    bb:call("set_IsDisableFlashLightSwitching", false)
+                    say("you have the flashlight too (the host has it)")
+                end
+                if want & 2 ~= 0 and not bb:call("get_HasLighter") then
+                    bb:call("set_HasLighter", true)
+                    say("you have the lighter too (the host has it)")
+                end
+            end)
+        end
+    end
     if not cfg.follow_host or hp == nil or hp.scene == nil or t_now - (hp.scene_t or 0) > 5 then story.bare = nil return end
     local host_bare, me_bare = hp.scene_chapter == "", me.chapter == "" or me.go == nil
     if not (host_bare or me_bare) or hp.scene == mine or not story.is_scene(hp.scene) or not story.is_scene(mine) or in_cutscene() then
@@ -4202,6 +4241,97 @@ local function make_drop(item, count, x, y, z)
     if ok then drops.stats.made = drops.stats.made + 1 end
 end
 
+-- Giving the partner something: a stack from our hands put on the floor at our feet as a drop (made
+-- in the partner's game too, see above), for them to pick up; anywhere, not only at an item box.
+-- Stocks of these kinds only: a gun would lose what it has loaded, and key items and files belong to
+-- the story of the one who has them.
+local SIG_REMOVE_HAND = "removePanel(app.Inventory.PanelKey, app.ItemStockChangedEventType)"
+local GIVE_KINDS = { Heal = true, Ammo = true, Material = true, SubWeapon = true }
+local give = { names = {}, kinds = {} }
+ext.give = give
+
+-- the item's name in the game's language and its category (from the item catalog), kept
+local function item_info(id_name)
+    local n = give.names[id_name]
+    if n then return n, give.kinds[id_name] end
+    local ok, s, kind = pcall(function()
+        local d = sdk.get_managed_singleton("app.ItemManager"):get_field("_ItemCatalog"):get_field("_Dict")
+        local count = d:get_field("_count")
+        for i, e in ipairs(d:get_field("_entries"):get_elements()) do
+            if i > count then break end
+            if (e:get_field("hashCode") or -1) >= 0 and e:get_field("key"):call("ToString") == id_name then
+                local det = e:get_field("value"):get_field("_Value")
+                local c = det:get_field("_ItemCategory")
+                local okc, cs = pcall(c.call, c, "ToString")
+                return sdk.find_type_definition("via.gui.message"):get_method("get(System.Guid)"):call(nil, det:get_field("_NameMessageId")),
+                    okc and cs or ""
+            end
+        end
+    end)
+    n = (ok and type(s) == "string" and s ~= "") and s or id_name
+    give.names[id_name], give.kinds[id_name] = n, ok and kind or ""
+    return n, give.kinds[id_name]
+end
+
+-- the stocks in our character's hands: { {inv, key, item, count, name}, ... }
+give.items = function()
+    local user = ({ cp_A100 = "User00", cp_A000 = "User01" })[me.kind]
+    local m = sdk.get_managed_singleton("app.InventoryManager")
+    local d = m and m:get_field("_Inventories")
+    local n = d and d:get_field("_count") or 0
+    local out = {}
+    for i, e in ipairs(elements(d and d:get_field("_entries")) or {}) do
+        if i > n then break end
+        local inv = (e:get_field("hashCode") or -1) >= 0 and e:get_field("value") or nil
+        local k = inv and inv:get_field("_InventoryKey")
+        local u = k and k:get_field("_User")
+        local okn, uname = pcall(function() return u:call("ToString") end)
+        if k and k:get_field("_BoardType") == 0 and not k:get_field("_IsTemporal") and okn and (user == nil or uname == user) then
+            for _, st in ipairs(elements(inv:call("getPanelStates")) or {}) do
+                local a = st:call("deployAmountData")
+                if a and a:get_type_definition():get_full_name() == "app.ItemStockData" then
+                    local item = st:get_field("<ItemID>k__BackingField"):call("ToString")
+                    local name, kind = item_info(item)
+                    if GIVE_KINDS[kind] then
+                        out[#out + 1] = { inv = inv, key = st:get_field("<Key>k__BackingField"), item = item,
+                            count = st:get_field("<Stock>k__BackingField") or 0, name = name }
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- inside the game's GUI update: the drop first, then the stack out of our hands
+give.drop = function(e)
+    ext.later(function()
+        local a = nil
+        for _, st in ipairs(elements(e.inv:call("getPanelStates")) or {}) do
+            if st:get_field("<ItemID>k__BackingField"):call("ToString") == e.item then
+                local okd, x = pcall(st.call, st, "deployAmountData")
+                if okd and x then a, e.key = x:add_ref(), st:get_field("<Key>k__BackingField") break end
+            end
+        end
+        if a == nil or me.go == nil then say("couldn't drop %s", e.name) return end
+        local tr = me.go:call("get_Transform")
+        local p = tr:call("get_Position")
+        local f = tr:call("get_Rotation") * Vector3f.new(0, 0, 1)
+        local pos = ValueType.new(sdk.find_type_definition("via.Position"))
+        pos:set_field("x", p.x + f.x * 0.8)
+        pos:set_field("y", p.y + 0.1)
+        pos:set_field("z", p.z + f.z * 0.8)
+        local im = sdk.get_managed_singleton("app.ItemManager")
+        if not pcall(im.call, im, SIG_GEN, a, pos, Quaternion.new(1, 0, 0, 0), relief(), nil, nil) then
+            say("couldn't drop %s", e.name)
+            return
+        end
+        local moved = sdk.find_type_definition("app.ItemStockChangedEventType"):get_field("Moved"):get_data(nil)
+        pcall(e.inv.call, e.inv, SIG_REMOVE_HAND, e.key, moved)
+        say("dropped %s x%d for your partner", e.name, e.count)
+    end)
+end
+
 local function take_drop(item, x, y, z)
     local at = Vector3f.new(x, y, z)
     for _, core in ipairs(world.scene_components(T_ITEM_CORE)) do
@@ -4737,11 +4867,12 @@ local function pump_world()
         local c = o.chunks[o.next]
         if c == nil then
             fresh.out = nil
-            say("sent your world to your partner (%d KB)", o.size // 1024)
+            say("sent your world to your partner (%d KB, %d pieces%s)", o.size // 1024, #o.chunks,
+                (o.waits or 0) > 0 and string.format("; Steam's queue was full %d times", o.waits) or "")
             return
         end
         local n = net.send(string.pack("<BI2I2I2s4", MSG.WORLD, o.tag, o.next, #o.chunks, c), true, CH_CTRL, o.to)
-        if (n or 0) <= 0 then return end -- Steam's queue is full: this piece again next frame
+        if (n or 0) <= 0 then o.waits = (o.waits or 0) + 1 return end -- Steam's queue is full: this piece again next frame
         o.next = o.next + 1
     end
 end
@@ -5101,7 +5232,7 @@ ext.fresh_ctrl = function(from, kind, data)
         local _, chapter, difficulty = string.unpack("<Bs1s1", data)
         fresh.host, fresh.chapter, fresh.play = from, chapter, { chapter, difficulty }
         if has_own_save() then
-            fresh.phase, fresh.t = "await_world", now()
+            fresh.phase, fresh.t, fresh.asked_again = "await_world", now(), false
             say("getting the host's world...")
             return
         end
@@ -5126,6 +5257,7 @@ ext.fresh_ctrl = function(from, kind, data)
         end
         if pt.chunks[idx] == nil then
             pt.chunks[idx], pt.got = chunk, pt.got + 1
+            if pt.got == 1 then say("the host's world is coming (%d pieces)", pt.total) end
         end
         if pt.got < pt.total then return end
         fresh.parts = nil
@@ -5194,8 +5326,18 @@ ext.fresh_late = function(t_now)
         log.info(TAG .. "restored: " .. table.concat(fresh.restored or {}, ", "))
         if fresh.own_keys then say("from your own save instead (the host's wouldn't load): %s", table.concat(fresh.own_keys, ", ")) end
     end
-    if fresh.phase == "await_world" and t_now - fresh.t > 40 and fresh.play then
+    -- over Steam the world (~0.7 MB) may take a while: asked again after 30 s if no piece came, the
+    -- new game only after 2 minutes (a guest who got none in 40 s got a new game in the host's chapter:
+    -- the host's dead enemies alive, no flashlight)
+    if fresh.phase == "await_world" and t_now - fresh.t > 30 and not fresh.asked_again and (fresh.parts == nil or fresh.parts.got == 0) then
+        fresh.asked_again = true
+        local g = guest_session()
+        if g then send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_WORLD), g.owner) end
+        say("no piece of the host's world yet: asking again")
+    end
+    if fresh.phase == "await_world" and t_now - fresh.t > 120 and fresh.play then
         -- no world came: the new game in the host's chapter instead
+        say("the host's world: %d of %s pieces came", fresh.parts and fresh.parts.got or 0, tostring(fresh.parts and fresh.parts.total or "?"))
         local play = fresh.play
         fresh.phase, fresh.t, fresh.via, fresh.active = "starting", t_now, "newgame", true
         ext.later(function()
@@ -5490,20 +5632,39 @@ local function compare(a, b, who)
     return out, counts
 end
 
+-- both games end up with the report: the request carries our side, the partner compares it with theirs
+-- and answers with theirs (a partner's check used to leave nothing on the PC that was asked)
+local function report(ours, theirs, from, why)
+    local p = peers[from]
+    local lines, c = compare(ours, theirs, p and p.name or "partner")
+    fs.write("re9coop_sync_report.txt", table.concat(lines, "\n"))
+    check.last = c
+    say("sync check (%s): %d story flows, %d gimmicks, %d items, %d enemies differ (re9coop_sync_report.txt)",
+        why, c.flows, c.gims, c.items, c.foes)
+end
+
 local function request(why)
     local p = partner_to_follow and partner_to_follow()
     if p == nil or p.id == LOOPBACK_ID then return "no partner" end
     check.waiting = { id = p.id, t = now(), why = why }
-    send_ctrl(string.pack("<B", MSG.CHECK_REQ), p.id)
+    ext.later(function()
+        local ok, d = pcall(digest)
+        if not ok then say("sync check failed here: %s", tostring(d)) end
+        send_ctrl(string.pack("<Bs4", MSG.CHECK_REQ, ok and json.dump_string(d) or ""), p.id)
+    end)
     return "asked " .. tostring(p.name)
 end
 check.request = request
 
 ext.check_ctrl = function(from, kind, data)
     if kind == MSG.CHECK_REQ then
+        local okr, _, s = pcall(string.unpack, "<Bs4", data)
         ext.later(function()
             local ok, d = pcall(digest)
-            if ok then send_ctrl(string.pack("<Bs4", MSG.CHECK, json.dump_string(d)), from) end
+            if not ok then say("sync check failed here: %s", tostring(d)) return end
+            send_ctrl(string.pack("<Bs4", MSG.CHECK, json.dump_string(d)), from)
+            local okj, theirs = pcall(json.load_string, okr and s or "")
+            if okj and type(theirs) == "table" then report(d, theirs, from, "asked by your partner") end
         end)
     elseif kind == MSG.CHECK then
         local w = check.waiting
@@ -5513,20 +5674,21 @@ ext.check_ctrl = function(from, kind, data)
         ext.later(function()
             local okj, theirs = pcall(json.load_string, s)
             local okd, ours = pcall(digest)
-            if not (okj and okd and type(theirs) == "table") then say("sync check failed") return end
-            local p = peers[from]
-            local lines, c = compare(ours, theirs, p and p.name or "partner")
-            fs.write("re9coop_sync_report.txt", table.concat(lines, "\n"))
-            check.last = c
-            say("sync check (%s): %d story flows, %d gimmicks, %d items, %d enemies differ (re9coop_sync_report.txt)",
-                w.why, c.flows, c.gims, c.items, c.foes)
+            if not (okj and okd and type(theirs) == "table") then
+                say("sync check failed: %s", tostring(not okd and ours or "the answer didn't read"))
+                return
+            end
+            report(ours, theirs, from, w.why)
         end)
     end
 end
 
 -- the guest checks by itself: a minute after it's settled in, then every 5 minutes
 ext.check_late = function(t_now)
-    if check.waiting and t_now - check.waiting.t > 20 then check.waiting = nil end
+    if check.waiting and t_now - check.waiting.t > 60 then
+        say("sync check (%s): no answer from your partner in 60 s", check.waiting.why)
+        check.waiting = nil
+    end
     local st = session.status
     local p = partner_to_follow and partner_to_follow()
     if not world_shared() or st == nil or st.is_host or p == nil or p.id == LOOPBACK_ID or p.chapter ~= me.chapter then
@@ -6327,6 +6489,17 @@ re.on_draw_ui(function()
             session.left, session.rj, cfg.last_host = true, nil, ""
             save_cfg()
             net.leave()
+        end
+        -- give your partner something from your hands
+        if ext.give and me.go and imgui.tree_node("Give your partner (dropped at your feet, in both games)") then
+            local ok, items = pcall(ext.give.items)
+            if not ok or #items == 0 then imgui.text("nothing to give (ammo, healing items and materials can be given)") end
+            for i, e in ipairs(ok and items or {}) do
+                if imgui.button("Drop##give" .. i) then ext.give.drop(e) end
+                imgui.same_line()
+                imgui.text(string.format("%s x%d", e.name, e.count))
+            end
+            imgui.tree_pop()
         end
     elseif st.state == "creating" or st.state == "joining" then
         imgui.text("...")

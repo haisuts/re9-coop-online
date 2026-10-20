@@ -22,7 +22,7 @@ extern "C" {
 
 #include "net.hpp"
 
-#define RE9COOP_NET_VERSION "0.3.1"
+#define RE9COOP_NET_VERSION "0.3.2"
 
 namespace {
 
@@ -122,6 +122,8 @@ int l_status(lua_State* L) {
     set_bool(L, "is_host", s.is_host);
     set_bool(L, "loopback", s.loopback);
     set_bool(L, "steam", s.steam);
+    lua_pushinteger(L, (lua_Integer)s.send_fail);
+    lua_setfield(L, -2, "send_fail");
     set_str(L, "error", s.error);
     lua_createtable(L, (int)s.members.size(), 0);
     int i = 0;

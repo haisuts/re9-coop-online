@@ -33,6 +33,7 @@ struct Status {
     bool is_host{false};
     bool loopback{false};
     bool steam{false};
+    std::uint64_t send_fail{0}; // sends Steam refused (a full queue, a broken session)
     std::string error;
     std::vector<Member> members;
 };

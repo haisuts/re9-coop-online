@@ -1,4 +1,4 @@
-# RE9 Co-op (online) — v0.12.6
+# RE9 Co-op (online) — v0.12.7
 
 Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
 relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
@@ -37,6 +37,9 @@ from it is used.
   Solved puzzles look solved for the partner at once: a coin locker opens (its item can be taken),
   the sun quartz safe opens, the pencil rubbing shows the note, the sun / moon / star door shows the
   emblems put in, the moon quartz comes out of its cabinet.
+- **Give your partner things**: in the mod's menu, "Give your partner" drops healing items, ammo,
+  materials or sub weapons from your hands at your feet, in both games; whoever picks it up has it.
+  The item boxes are shared too: what one puts in, the other can take out of theirs.
 - **Crafting recipes for both**: a recipe one player unlocks (a recipe file, the blood analysis at the
   laser microscope) is unlocked in the partner's game too, marked as new.
 - **Boss fights**: a boss is run by one player for the whole fight (the one nearer when it appears),
@@ -334,7 +337,10 @@ With one PC (self-test echo + simulated partner messages), 2026-10-15:
   the ending, the credits and the results screen in both games; the other ending; a co-op playthrough
   from New Game (the guest with a save of their own joined from the title, 0 differences a minute
   later); a guest joining a host in another chapter (Leon's Chap4_10) came in as Leon.
-- Not yet: a real two-PC session; in the last battle's second phase the coils the guest works in their
+- Over Steam (two real sessions) the host's world hasn't reached the guest yet: the guest then
+  starts in the host's chapter as a new game (0.12.7 waits longer, asks again and logs how much
+  came; it gives the guest the flashlight the host has).
+- Not yet: a two-PC session with the host's world arriving; in the last battle's second phase the coils the guest works in their
   own game may not count for the host's (the host should work them).
 
 ## How it works

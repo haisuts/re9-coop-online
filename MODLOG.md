@@ -976,6 +976,36 @@ way round; drawers and cabinets open without their movement.
 - Test tools: the cutscene skip through TimelineEventMediator.skip (keys opened the pause menu after a
   scene had ended, and F picked "Restart").
 
+## v0.12.7 (2026-10-20) — the first sessions with a friend over Steam
+
+From the logs of two real sessions (2026-10-18 v0.11.0 and 2026-10-20 v0.12.6; the two PCs' clocks
+53 s apart):
+- The host's world never reached the guest over Steam ("the host's world didn't come" both times,
+  the host having sent all 13 pieces): the guest got a new game right in the host's chapter instead,
+  so zombies the host had killed were alive there, and Grace had no flashlight (that new game skips
+  the scene where she gets it: FlashLightBlackboardUnit.HasFlashLight false, its switching off).
+  Cause not found yet (on the stand's LAN it comes in a second). Now: the guest says when the first
+  piece comes and how many came, asks again after 30 s with none, waits 2 minutes before the new
+  game; the host says how often Steam's queue was full; the plugin (0.3.2) raises Steam's send
+  buffer to 16 MB (SetGlobalConfigValueInt32, k_ESteamNetworkingConfig_SendBufferSize) and counts
+  refused sends (status.send_fail).
+- A guest in a co-op playthrough gets the flashlight and the lighter when the host has them (each
+  game sends its two flags with its scene). tools/give_flashlight.lua does it by hand (ScriptRunner >
+  Run script) for older versions; checked on the stand: a new game in Chap3_02 had HasFlashLight
+  false, after it the flashlight switched on.
+- The partner's dead enemies lay there "alive" (groaning): 0.12.6's plain lethal hit first. Regular
+  enemies die outright again (a zombie's copy: HP 0, dead, no longer updated, within 2 s); only
+  bosses get the plain hit first and their no-death cleared, now with one empty array made once and
+  held (add_ref_permanent): the one made for each call was freed by Lua while the game kept it, the
+  likely cause of the guest's crash (CharacterMeshControllerBase.lateUpdate, 47 s after the first).
+- The sync check leaves its report on both PCs (the request carries our side, the partner compares
+  too); a failed digest and a check with no answer in 60 s are said. Protocol 15.
+- "Give your partner" in the mod's menu (in a session): healing items, ammo, materials and sub
+  weapons from your hands, dropped at your feet as a drop the partner's game makes too, anywhere
+  (the item boxes are shared already, at a box). Names from the item catalog in the game's language.
+- tools/give_ammo.lua (two stacks of the Requiem revolver's 12.7x55 mm rounds as drops for both),
+  tools/flashlight_check.lua (what the player's flashlight is tied to, read only).
+
 ## Next steps
 - [ ] Two-PC test over Steam (friend with the game): lobby, invite, P2P, puppet both ways.
 - [ ] v0.2: muzzle flash / gun sound / flashlight on the puppet (find the game's shot effect call).

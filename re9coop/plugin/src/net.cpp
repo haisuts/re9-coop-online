@@ -67,6 +67,7 @@ bool load_api(Api& a, const char** missing) {
     ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser", a.CloseSessionWithUser, missing);
     ok &= get_proc(m, "SteamAPI_SteamNetworkingMessage_t_Release", a.MessageRelease, missing);
     ok &= get_proc(m, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", a.InitRelayNetworkAccess, missing);
+    get_proc(m, "SteamAPI_ISteamNetworkingUtils_SetGlobalConfigValueInt32", a.SetGlobalConfigValueInt32, nullptr);
     a.loaded = ok;
     return ok;
 }
@@ -500,6 +501,10 @@ bool init() {
     g_st.steam = true;
     g_st.me = g_api.GetSteamID(g_api.SteamUser());
     g_api.InitRelayNetworkAccess(g_api.SteamNetworkingUtils());
+    // the host's world (~0.7 MB) goes out at once: room for it in the send queue (Steam's default 512 KB)
+    if (g_api.SetGlobalConfigValueInt32) {
+        g_api.SetGlobalConfigValueInt32(g_api.SteamNetworkingUtils(), steam::k_ESteamNetworkingConfig_SendBufferSize, 16 * 1024 * 1024);
+    }
     g_api.RegisterCallback(&g_cb_join, g_cb_join.GetICallback());
     g_api.RegisterCallback(&g_cb_rp, g_cb_rp.GetICallback());
     g_api.RegisterCallback(&g_cb_session, g_cb_session.GetICallback());
@@ -680,6 +685,8 @@ int send(const std::string& data, bool reliable, int channel, std::uint64_t to) 
         auto i = ident(m.id);
         if (g_api.SendMessageToUser(nm(), &i, data.data(), (std::uint32_t)data.size(), flags, channel) == steam::k_EResultOK) {
             ++count;
+        } else {
+            ++g_st.send_fail;
         }
     }
     return count;

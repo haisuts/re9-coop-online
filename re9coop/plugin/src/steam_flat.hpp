@@ -183,7 +183,10 @@ struct Api {
 
     // ISteamNetworkingUtils
     void (*InitRelayNetworkAccess)(void*);
+    bool (*SetGlobalConfigValueInt32)(void*, int, std::int32_t); // optional (may be null)
 };
+
+constexpr int k_ESteamNetworkingConfig_SendBufferSize = 9;
 
 // Resolves every pointer; returns false (and names the first missing export) if anything is absent.
 bool load_api(Api& api, const char** missing);
