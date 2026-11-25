@@ -101,8 +101,9 @@ MODLOG.md                        # Reverse-engineering & testing journal
 
 ## Credits, License & AI Disclosure
 
+- **Author & Maintainer:** [@haisuts](https://github.com/haisuts) ([Contributors](https://github.com/haisuts/re9-coop-online/graphs/contributors))
 - **License:** Mod source code in this repository is licensed under the [MIT License](LICENSE). Bundled REFramework binaries are redistributed unmodified under REFramework's MIT License (`re9coop/third_party/`).
 - **REFramework** by praydog and contributors.
 - Inspired by *RE2 Co-op: HUNK* (Nexus Mods #2938); no code from it is used.
 - RE9 asset/path references: Ekey's `REE.PAK.Tool`.
-- **AI Disclosure:** Built and tested with AI coding agents (Claude by Anthropic and Gemini / Antigravity) using the `universal-modder` modding toolkit.
+- **Tooling & AI Disclosure:** Built and tested using the [coop-anything](https://github.com/cranebeaker/coop-anything) and `universal-modder` plugins with AI coding agents (Claude by Anthropic and Gemini / Antigravity).

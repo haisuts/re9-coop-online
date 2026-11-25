@@ -113,7 +113,8 @@ Delete the following files from your Resident Evil Requiem folder:
 
 ## Credits & AI Disclosure
 
+- **Author & Contributors:** [@haisuts](https://github.com/haisuts) ([Contributors](https://github.com/haisuts/re9-coop-online/graphs/contributors))
 - **REFramework** by praydog and contributors (MIT License), bundled unmodified as `dinput8.dll` with notices in `licenses/`.
 - Inspired by *RE2 Co-op: HUNK* (Nexus Mods #2938); no code reused.
 - RE9 file path lists reference Ekey's `REE.PAK.Tool` project.
-- Built and verified with AI coding agents (Claude by Anthropic and Gemini / Antigravity) using the `universal-modder` toolkit.
+- Built and verified using the [coop-anything](https://github.com/cranebeaker/coop-anything) and `universal-modder` plugins with AI coding agents (Claude by Anthropic and Gemini / Antigravity).
