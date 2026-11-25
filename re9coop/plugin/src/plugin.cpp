@@ -5,9 +5,11 @@
 // never raises a Lua error (our Lua copy and REFramework's must not unwind each other's frames).
 
 #include <windows.h>
+#include <compressapi.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -22,7 +24,7 @@ extern "C" {
 
 #include "net.hpp"
 
-#define RE9COOP_NET_VERSION "0.3.2"
+#define RE9COOP_NET_VERSION "0.3.3"
 
 namespace {
 
@@ -114,7 +116,7 @@ int l_friends(lua_State* L) {
 
 int l_status(lua_State* L) {
     const auto s = net::status();
-    lua_createtable(L, 0, 10);
+    lua_createtable(L, 0, 14);
     set_str(L, "state", net::state_name(s.state));
     set_str(L, "lobby", s.lobby ? id_str(s.lobby) : "");
     set_str(L, "owner", s.owner ? id_str(s.owner) : "");
@@ -124,13 +126,29 @@ int l_status(lua_State* L) {
     set_bool(L, "steam", s.steam);
     lua_pushinteger(L, (lua_Integer)s.send_fail);
     lua_setfield(L, -2, "send_fail");
+    lua_pushinteger(L, (lua_Integer)s.last_send_err);
+    lua_setfield(L, -2, "last_send_err");
+    lua_pushinteger(L, (lua_Integer)s.relay_avail);
+    lua_setfield(L, -2, "relay_avail");
+    set_str(L, "relay_msg", s.relay_msg);
+    set_str(L, "session_fail", s.session_fail);
     set_str(L, "error", s.error);
     lua_createtable(L, (int)s.members.size(), 0);
     int i = 0;
     for (auto& m : s.members) {
-        lua_createtable(L, 0, 2);
+        lua_createtable(L, 0, 8);
         set_str(L, "id", id_str(m.id));
         set_str(L, "name", m.name);
+        lua_pushinteger(L, (lua_Integer)m.conn_state);
+        lua_setfield(L, -2, "conn_state");
+        lua_pushinteger(L, (lua_Integer)m.conn_end);
+        lua_setfield(L, -2, "conn_end");
+        lua_pushinteger(L, (lua_Integer)m.ping);
+        lua_setfield(L, -2, "ping");
+        set_bool(L, "relayed", m.relayed);
+        lua_pushinteger(L, (lua_Integer)m.pending_rel);
+        lua_setfield(L, -2, "pending_rel");
+        set_str(L, "conn_debug", m.conn_debug);
         lua_rawseti(L, -2, ++i);
     }
     lua_setfield(L, -2, "members");
@@ -179,6 +197,71 @@ int l_pending_join(lua_State* L) {
         const auto s = id_str(id);
         lua_pushlstring(L, s.data(), s.size());
     }
+    return 1;
+}
+
+int l_compress(lua_State* L) {
+    size_t len = 0;
+    const char* data = lua_tolstring(L, 1, &len);
+    if (data == nullptr || len == 0 || len > 32u * 1024u * 1024u) {
+        lua_pushnil(L);
+        return 1;
+    }
+    COMPRESSOR_HANDLE h = nullptr;
+    if (!CreateCompressor(COMPRESS_ALGORITHM_MSZIP, nullptr, &h)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    SIZE_T out_sz = 0;
+    Compress(h, data, len, nullptr, 0, &out_sz);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || out_sz == 0) {
+        CloseCompressor(h);
+        lua_pushnil(L);
+        return 1;
+    }
+    std::string out(4 + out_sz, '\0');
+    const std::uint32_t orig = static_cast<std::uint32_t>(len);
+    std::memcpy(&out[0], &orig, 4);
+    SIZE_T written = 0;
+    const BOOL ok = Compress(h, data, len, &out[4], out_sz, &written);
+    CloseCompressor(h);
+    if (!ok || 4 + written >= len) {
+        lua_pushnil(L);
+        return 1;
+    }
+    out.resize(4 + written);
+    lua_pushlstring(L, out.data(), out.size());
+    return 1;
+}
+
+int l_decompress(lua_State* L) {
+    size_t len = 0;
+    const char* data = lua_tolstring(L, 1, &len);
+    if (data == nullptr || len < 5) {
+        lua_pushnil(L);
+        return 1;
+    }
+    std::uint32_t orig = 0;
+    std::memcpy(&orig, data, 4);
+    if (orig == 0 || orig > 64u * 1024u * 1024u) {
+        lua_pushnil(L);
+        return 1;
+    }
+    DECOMPRESSOR_HANDLE h = nullptr;
+    if (!CreateDecompressor(COMPRESS_ALGORITHM_MSZIP, nullptr, &h)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    std::string out(orig, '\0');
+    SIZE_T written = 0;
+    const BOOL ok = Decompress(h, data + 4, len - 4, &out[0], orig, &written);
+    CloseDecompressor(h);
+    if (!ok) {
+        lua_pushnil(L);
+        return 1;
+    }
+    out.resize(written);
+    lua_pushlstring(L, out.data(), out.size());
     return 1;
 }
 
@@ -251,6 +334,8 @@ void register_lua(lua_State* L) {
         {"recv", l_recv},
         {"set_loopback", l_set_loopback},
         {"pending_join", l_pending_join},
+        {"compress", l_compress},
+        {"decompress", l_decompress},
         {"dev_dump_types", l_dev_dump_types},
         {"dev_singletons", l_dev_singletons},
         {nullptr, nullptr},

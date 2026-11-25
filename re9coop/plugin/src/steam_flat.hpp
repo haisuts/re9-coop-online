@@ -180,13 +180,67 @@ struct Api {
     bool (*AcceptSessionWithUser)(void*, const SteamNetworkingIdentity*);
     bool (*CloseSessionWithUser)(void*, const SteamNetworkingIdentity*);
     void (*MessageRelease)(SteamNetworkingMessage_t*);
+    int (*GetSessionConnectionInfo)(void*, const SteamNetworkingIdentity*, void*, void*); // optional
 
     // ISteamNetworkingUtils
     void (*InitRelayNetworkAccess)(void*);
     bool (*SetGlobalConfigValueInt32)(void*, int, std::int32_t); // optional (may be null)
+    int (*GetRelayNetworkStatus)(void*, void*); // optional
 };
 
 constexpr int k_ESteamNetworkingConfig_SendBufferSize = 9;
+
+struct SteamRelayNetworkStatus_t {
+    enum { k_iCallback = 1281 };
+    int m_eAvail;
+    int m_bPingMeasurementInProgress;
+    int m_eAvailNetworkConfig;
+    int m_eAvailAnyRelay;
+    char m_debugMsg[256];
+};
+
+#pragma pack(push, 8)
+struct SteamNetConnectionInfo_t {
+    SteamNetworkingIdentity m_identityRemote;
+    int64 m_nUserData;
+    uint32_t m_hListenSocket;
+    std::uint8_t m_addrRemote[18]; // SteamNetworkingIPAddr
+    std::uint16_t m__pad1;
+    std::uint32_t m_idPOPRemote;
+    std::uint32_t m_idPOPRelay;
+    int m_eState;
+    int m_eEndReason;
+    char m_szEndDebug[128];
+    char m_szConnectionDescription[128];
+    int m_nFlags;
+    std::uint32_t reserved[63];
+};
+
+struct SteamNetConnectionRealTimeStatus_t {
+    int m_eState;
+    int m_nPing;
+    float m_flConnectionQualityLocal;
+    float m_flConnectionQualityRemote;
+    float m_flOutPacketsPerSec;
+    float m_flOutBytesPerSec;
+    float m_flInPacketsPerSec;
+    float m_flInBytesPerSec;
+    int m_nSendRateBytesPerSecond;
+    int m_cbPendingUnreliable;
+    int m_cbPendingReliable;
+    int m_cbSentUnackedReliable;
+    int64 m_usecQueueTime;
+    std::int32_t m_usecMaxJitter;
+    std::uint32_t reserved[15];
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+struct SteamNetworkingMessagesSessionFailed_t {
+    enum { k_iCallback = 1252 };
+    SteamNetConnectionInfo_t m_info;
+};
+#pragma pack(pop)
 
 // Resolves every pointer; returns false (and names the first missing export) if anything is absent.
 bool load_api(Api& api, const char** missing);

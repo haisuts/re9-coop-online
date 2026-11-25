@@ -12,6 +12,12 @@ enum class State { Idle, Creating, Joining, InLobby, Error };
 struct Member {
     std::uint64_t id;
     std::string name;
+    int conn_state{0};     // ESteamNetworkingConnectionState (0=none, 1=connecting, 2=finding_route, 3=connected, 4=closed, 5=problem)
+    int conn_end{0};       // ESteamNetConnectionEnd
+    int ping{-1};
+    bool relayed{false};
+    int pending_rel{0};
+    std::string conn_debug;
 };
 
 struct Packet {
@@ -34,6 +40,10 @@ struct Status {
     bool loopback{false};
     bool steam{false};
     std::uint64_t send_fail{0}; // sends Steam refused (a full queue, a broken session)
+    int last_send_err{0};       // last non-OK EResult from SendMessageToUser
+    int relay_avail{0};         // ESteamNetworkingAvailability (100=current, 3=attempting, <0=failed)
+    std::string relay_msg;
+    std::string session_fail;   // last SteamNetworkingMessagesSessionFailed_t summary
     std::string error;
     std::vector<Member> members;
 };

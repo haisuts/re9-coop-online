@@ -32,7 +32,7 @@ cl /nologo /c /O2 /MT /W4 /EHsc /std:c++20 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
    /I"%LUA%" /I"%REF%\include" ^
    "%HERE%src\plugin.cpp" "%HERE%src\net.cpp" || goto :fail
 
-link /nologo /DLL /OUT:"%OUT%\re9coop_net.dll" *.obj user32.lib kernel32.lib ws2_32.lib || goto :fail
+link /nologo /DLL /OUT:"%OUT%\re9coop_net.dll" *.obj user32.lib kernel32.lib ws2_32.lib cabinet.lib || goto :fail
 popd
 echo built %OUT%\re9coop_net.dll
 exit /b 0

@@ -66,8 +66,10 @@ bool load_api(Api& a, const char** missing) {
     ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser", a.AcceptSessionWithUser, missing);
     ok &= get_proc(m, "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser", a.CloseSessionWithUser, missing);
     ok &= get_proc(m, "SteamAPI_SteamNetworkingMessage_t_Release", a.MessageRelease, missing);
+    get_proc(m, "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo", a.GetSessionConnectionInfo, nullptr);
     ok &= get_proc(m, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", a.InitRelayNetworkAccess, missing);
     get_proc(m, "SteamAPI_ISteamNetworkingUtils_SetGlobalConfigValueInt32", a.SetGlobalConfigValueInt32, nullptr);
+    get_proc(m, "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", a.GetRelayNetworkStatus, nullptr);
     a.loaded = ok;
     return ok;
 }
@@ -314,6 +316,7 @@ void clear_lobby() {
     g_st.lobby = 0;
     g_st.owner = 0;
     g_st.is_host = false;
+    g_st.session_fail.clear();
     g_st.members.clear();
     g_next_hello.clear();
     g_heard.clear();
@@ -325,9 +328,25 @@ void refresh_members() {
     for (int i = 0; i < n; ++i) {
         const auto id = g_api.GetLobbyMemberByIndex(mm(), g_st.lobby, i);
         const char* name = g_api.GetFriendPersonaName(fr(), id);
-        list.push_back({id, name ? name : ""});
+        Member m{id, name ? name : ""};
+        if (id != g_st.me && g_api.GetSessionConnectionInfo) {
+            auto peer = ident(id);
+            steam::SteamNetConnectionInfo_t info{};
+            steam::SteamNetConnectionRealTimeStatus_t rt{};
+            m.conn_state = g_api.GetSessionConnectionInfo(nm(), &peer, &info, &rt);
+            m.conn_end = info.m_eEndReason;
+            m.ping = (m.conn_state == 3) ? rt.m_nPing : -1;
+            m.relayed = (info.m_nFlags & 16) != 0;
+            m.pending_rel = rt.m_cbPendingReliable;
+            info.m_szEndDebug[sizeof(info.m_szEndDebug) - 1] = '\0';
+            m.conn_debug = info.m_szEndDebug;
+        }
+        list.push_back(std::move(m));
     }
-    g_st.owner = g_api.GetLobbyOwner(mm(), g_st.lobby);
+    // Pin the original creator in lobby data ("host") so a brief Steam hiccup cannot flip host to the guest.
+    const char* pinned = g_api.GetLobbyData(mm(), g_st.lobby, "host");
+    const std::uint64_t pinned_id = (pinned && *pinned) ? std::strtoull(pinned, nullptr, 10) : 0;
+    g_st.owner = pinned_id ? pinned_id : g_api.GetLobbyOwner(mm(), g_st.lobby);
     g_st.is_host = g_st.owner == g_st.me;
     // new members: open the session from our side (sending implicitly accepts theirs)
     for (auto& m : list) {
@@ -355,6 +374,16 @@ void refresh_members() {
 void send_hellos(ULONGLONG now) {
     for (auto& [id, next] : g_next_hello) {
         if (now < next) continue;
+        // If a P2P session entered ClosedByPeer (4) or ProblemDetectedLocally (5), reset it cleanly.
+        for (const auto& m : g_st.members) {
+            if (m.id == id && (m.conn_state == 4 || m.conn_state == 5)) {
+                auto i = ident(id);
+                g_api.CloseSessionWithUser(nm(), &i);
+                g_api.AcceptSessionWithUser(nm(), &i);
+                g_heard.erase(id);
+                break;
+            }
+        }
         // keep saying hello until we've heard back, then every 5 s as a keepalive
         next = now + (g_heard.count(id) ? 5000 : 1000);
         auto i = ident(id);
@@ -396,6 +425,9 @@ void poll_call() {
         g_st.lobby = r.m_ulSteamIDLobby;
         g_st.state = State::InLobby;
         g_api.SetLobbyData(mm(), g_st.lobby, kLobbyTag, kProtocol);
+        char host_id[32];
+        std::snprintf(host_id, sizeof(host_id), "%llu", (unsigned long long)g_st.me);
+        g_api.SetLobbyData(mm(), g_st.lobby, "host", host_id);
         char connect[64];
         std::snprintf(connect, sizeof(connect), "+connect_lobby %llu", (unsigned long long)g_st.lobby);
         g_api.SetRichPresence(fr(), "connect", connect);
@@ -459,9 +491,20 @@ void on_session_request(steam::SteamNetworkingMessagesSessionRequest_t* p) {
     }
 }
 
+void on_session_failed(steam::SteamNetworkingMessagesSessionFailed_t* p) {
+    std::lock_guard _{g_mx};
+    char dbg[128]{};
+    std::memcpy(dbg, p->m_info.m_szEndDebug, 127);
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "peer=%llu end=%d %s",
+        (unsigned long long)p->m_info.m_identityRemote.steam_id(), p->m_info.m_eEndReason, dbg);
+    g_st.session_fail = buf;
+}
+
 Callback<steam::GameLobbyJoinRequested_t, on_lobby_join_requested> g_cb_join;
 Callback<steam::GameRichPresenceJoinRequested_t, on_rich_presence_join> g_cb_rp;
 Callback<steam::SteamNetworkingMessagesSessionRequest_t, on_session_request> g_cb_session;
+Callback<steam::SteamNetworkingMessagesSessionFailed_t, on_session_failed> g_cb_session_fail;
 
 } // namespace
 
@@ -508,6 +551,7 @@ bool init() {
     g_api.RegisterCallback(&g_cb_join, g_cb_join.GetICallback());
     g_api.RegisterCallback(&g_cb_rp, g_cb_rp.GetICallback());
     g_api.RegisterCallback(&g_cb_session, g_cb_session.GetICallback());
+    g_api.RegisterCallback(&g_cb_session_fail, g_cb_session_fail.GetICallback());
     // launched by Steam from an invite while the game wasn't running
     g_pending_join = parse_connect(GetCommandLineA());
     g_st.error.clear();
@@ -521,6 +565,7 @@ void shutdown() {
     g_api.UnregisterCallback(&g_cb_join);
     g_api.UnregisterCallback(&g_cb_rp);
     g_api.UnregisterCallback(&g_cb_session);
+    g_api.UnregisterCallback(&g_cb_session_fail);
     g_inited = false;
 }
 
@@ -529,6 +574,12 @@ void tick() {
     if (!g_inited && !init()) return;
     if (g_lan.on) return lan_tick();
     poll_call();
+    if (g_api.GetRelayNetworkStatus) {
+        steam::SteamRelayNetworkStatus_t rs{};
+        g_st.relay_avail = g_api.GetRelayNetworkStatus(g_api.SteamNetworkingUtils(), &rs);
+        rs.m_debugMsg[sizeof(rs.m_debugMsg) - 1] = '\0';
+        g_st.relay_msg = rs.m_debugMsg;
+    }
     if (g_st.state != State::InLobby) return;
     const auto now = GetTickCount64();
     if (now >= g_next_refresh) {
@@ -683,10 +734,12 @@ int send(const std::string& data, bool reliable, int channel, std::uint64_t to) 
     for (auto& m : g_st.members) {
         if (m.id == g_st.me || (to != 0 && to != m.id)) continue;
         auto i = ident(m.id);
-        if (g_api.SendMessageToUser(nm(), &i, data.data(), (std::uint32_t)data.size(), flags, channel) == steam::k_EResultOK) {
+        const int res = g_api.SendMessageToUser(nm(), &i, data.data(), (std::uint32_t)data.size(), flags, channel);
+        if (res == steam::k_EResultOK) {
             ++count;
         } else {
             ++g_st.send_fail;
+            g_st.last_send_err = res;
         }
     }
     return count;

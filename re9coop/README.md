@@ -1,424 +1,119 @@
-# RE9 Co-op (online) — v0.12.7
+# RE9 Co-op (Online) — v0.12.9
 
-Online co-op for **Resident Evil Requiem** (Steam) through Steam lobbies and Steam's peer-to-peer
-relay. Inspired by the local co-op mod *RE2 Co-op: HUNK* (Nexus, residentevil22019 mod 2938); no code
-from it is used.
+Online co-op mod for **Resident Evil Requiem** (Steam) using Steam lobbies and Steam's peer-to-peer relay (`ISteamNetworkingMessages`). No port forwarding or VPN required.
 
-**What it does:**
-- **Your partner in your world**: a fully posed character in their own costume and hair — every
-  animation they play, the gun in their hands, a name tag with the ping, their muzzle flash, gun
-  sounds and flashlight.
-- **Shared enemies**: each enemy is run by the player it's closest to, so enemies hunt, grab and hurt
-  both of you. The other player sees the same enemy pose for pose; their hits on it count, and an enemy
-  killed by one player is dead in the other's game too.
-- **Out of the world**: a player who falls through the map (40 m below where the fall began) is put
-  back where they stood a few seconds before; nobody is sent to a partner who isn't standing anywhere.
-- **Your partner's sounds**: their footsteps (on whatever floor they walk on), clothes, breathing and
-  hands come from their character in your game, besides their gun.
-- **Switches and breakables the game's way**: a light switch your partner flips or a crate they break
-  switches and breaks in your game too, with its own animation, debris and sound (other puzzles and
-  locks still jump to the partner's state).
-- **Shared doors and pickups**: a door your partner opens (walking into it or with the interact key)
-  swings open in your game too, at the same angle, and closes with theirs; a drawer they pull out or a
-  cabinet door / lever they move moves the same way in yours. An item your partner picks up disappears
-  from yours. A door you opened before that won't move any more (a
-  session with an older version could leave doors held by a scene that never plays in your game):
-  the mod's menu then shows "Free stuck doors"; press it as the host (or alone), then save.
-- **Story steps (experimental)**: every level-flow step either of you takes is taken by the other
-  game too; a joining guest gets the host's chapter progress.
-- **Chapters**: when the host moves on, the guest's game follows 5 s later (countdown on screen),
-  into the host's own scene (several scenes share a chapter), the last battle, found footage and the
-  ending's scenes and credits included.
-- **Locks, keys, puzzles, switches — live**: a lock one player opens (with a key or otherwise) opens
-  in the partner's game too, right away, without any scene for the partner's character; items placed
-  into puzzle slots count for both; switch positions and other gimmick states follow as soon as the
-  partner is near them. Gimmicks in areas the partner hasn't loaded take the state when they load.
-  Either player can solve a puzzle: the guest's solution counts in the host's game the same way.
-  Solved puzzles look solved for the partner at once: a coin locker opens (its item can be taken),
-  the sun quartz safe opens, the pencil rubbing shows the note, the sun / moon / star door shows the
-  emblems put in, the moon quartz comes out of its cabinet.
-- **Give your partner things**: in the mod's menu, "Give your partner" drops healing items, ammo,
-  materials or sub weapons from your hands at your feet, in both games; whoever picks it up has it.
-  The item boxes are shared too: what one puts in, the other can take out of theirs.
-- **Crafting recipes for both**: a recipe one player unlocks (a recipe file, the blood analysis at the
-  laser microscope) is unlocked in the partner's game too, marked as new.
-- **Boss fights**: a boss is run by one player for the whole fight (the one nearer when it appears),
-  so its phases and attack patterns aren't broken by handing it back and forth. The other player sees
-  it move for move and their hits count. It only changes hands when its player leaves the fight, goes
-  down or dies (on the game over screen): then the other player gets it at once. When it dies in one
-  game it dies in the other too (even a boss that can't die there yet).
-- **Cutscenes**: the partner is hidden while either of you is in one.
-- **Downed, not dead**: while your partner is with you, a hit that would kill you leaves you on your
-  last breath instead — you can't move or shoot, enemies can't hurt you more — and your partner gets
-  you up by crouching next to you for 2.5 s (you come back with a third of your health). If nobody
-  gets you up within 30 s, you come to next to your partner (no game over). If your partner leaves,
-  you both go down, or your partner has died, it's game over as usual.
-- **After a game over**: the player who died continues from their last save as usual; the partner who
-  stayed sends them the chapter as it is now (story steps, locks and puzzles, item box, recipes, the
-  pickups made), so their world catches up instead of the other one going back.
-- **Cutscenes together**: a story cutscene that starts in one game plays in the other too, and one
-  that one of you skips is skipped for the other too.
-- **Where your partner is**: on the game's map (a dot with their name, "above" / "below" for another
-  floor) and, when they're out of sight, their name and distance at the edge of the screen.
-- **Enemy drops for both**: what an enemy leaves is there in both games, at the same spot; whoever
-  picks it up takes it (or each player their own with the "each picks up their own" option).
-- **Reconnecting**: if the session drops (or a game crashes and is restarted), it is joined again by
-  itself — the guest finds the host's session, the host hosts again.
-- **Grabs**: when an enemy grabs you, your partner frees you by shooting that enemy or hitting it
-  (knife, kick) next to you; the grab ends at once.
-- **Weapons and key items for both**: a weapon, key item, file, map or upgrade one player picks up stays
-  in the world for the other to pick up their own copy. Ammo, healing items and crafting materials are
-  shared (whoever takes them first) — or each player's own with "Ammo, healing and materials: each
-  player picks up their own".
-- **One item box for both**: what one player puts in the item box, the other finds in theirs and can
-  take out (guns keep their loaded ammo).
-- **The guest plays in the host's world (a co-op playthrough)**: the guest joins from the main menu
-  (not from their own save). The host's game sends its whole world, as a save of it would hold it now
-  (about 0.7 MB): story, cutscenes seen, items taken, enemies, locks and puzzles, the map, the chapter
-  and the spot the host is at. The guest's game loads it as if it were their own save: they come up
-  next to the host, in the same world. The guest's own saves are never touched: their save file is
-  only read, and while they play with you their game saves nothing into its save slots. What the guest
-  carries (Leon's and Grace's items, ammo, money, pouches, equipped weapons) is their own, kept by the
-  mod for this host and back the next time they join you; the first time they get a copy of what you
-  carry. The item box is yours. Each time you save, your world goes to the guest again; a game over or
-  "Restart" in the co-op playthrough loads your last world (not the guest's own save). A guest who has
-  never saved gets a new game in your chapter instead. A guest who joins while playing their own save
-  is asked to go to the main menu first (nothing is shared until then).
-- **Saving together**: the host saves as usual (autosaves, typewriter); each time, the mod also keeps
-  what the guest carries. To go on later: the host loads their save and hosts, the guest joins from
-  the main menu.
-- **Sync check**: "Check sync with partner" in the menu (and the guest's game by itself a minute after
-  joining, then every 5 minutes) compares the two games: story, every puzzle and lock, the items lying
-  about, the enemies (alive, HP, where) and how each game's copy of the other player is doing. The
-  counts show on screen and in the log; the details go to `reframework/data/re9coop_sync_report.txt`.
-  When something looks wrong, send that file from both games.
-- **Teleport to partner**, partner health in the name tag, public lobbies and a "Copy lobby ID" button.
-
-**Not shared:** what you carry (each keeps their own inventory; the guest's is kept by the mod).
-
-### Install (both players)
-Unpack the archive into the game folder (where `re9.exe` is) and let the `reframework` folder merge.
-Everything the mod needs is in it:
-- `dinput8.dll` — REFramework, nightly build 01432 (commit d052e8f), unmodified: the build the mod is
-  tested with. If you already use REFramework, this replaces your `dinput8.dll`.
-- `reframework/autorun/re9coop_main.lua` and `reframework/plugins/re9coop_net.dll` — the mod. The
-  plugin uses the game's own `steam_api64.dll`; nothing else to install (no runtimes, no Steamworks).
-- `licenses/` — REFramework's license and the licenses of the libraries inside it.
-
-Both players need the same mod version. Steam has to be running (the game needs it anyway).
+Inspired by *RE2 Co-op: HUNK* (Nexus Mods #2938); written completely from scratch for Resident Evil Requiem.
 
 ---
 
-## Русский
+## Requirements
 
-**Что синхронизируется:**
-- **Напарник в вашем мире:** персонаж в своём костюме и с причёской, со всеми анимациями, оружием,
-  вспышками выстрелов, звуками оружия, фонариком; над головой ник, здоровье в % и пинг.
-- **Враги:** каждым врагом управляет тот, к кому он ближе, — враги нападают на обоих; попадания
-  обоих засчитываются; второй игрок видит того же врага движение в движение.
-- **Провал под карту:** игрок, провалившийся сквозь мир (на 40 м ниже места, где начал падать),
-  возвращается туда, где стоял несколько секунд назад; к напарнику, который сам падает, никого не
-  телепортирует.
-- **Звуки напарника:** его шаги (по тому полу, по которому он идёт), одежда, дыхание и руки звучат у
-  вашей копии напарника, а не только его оружие.
-- **Выключатели и ломаемые предметы:** выключатель, который щёлкнул напарник, и ящик, который он
-  разбил, переключаются и ломаются и у вас — со своей анимацией, обломками и звуком (остальные загадки
-  и замки по-прежнему просто встают в состояние напарника).
-- **Двери и ящики:** дверь, которую открыл напарник (вошёл в неё или нажал кнопку), открывается и у вас
-  на тот же угол и закрывается вместе с его дверью; выдвинутый им ящик, открытая дверца шкафа или рычаг
-  двигаются у вас так же. Если дверь, которую вы уже открывали,
-  больше не двигается (после сессии со старой версией двери могли остаться «удержанными» сценкой,
-  которая в вашей игре не идёт), в меню мода появится кнопка «Free stuck doors»: нажмите её у хоста
-  (или в одиночной игре) и сохранитесь.
-- **Предметы:** подобранный предмет исчезает и у напарника (инвентари у каждого свои).
-- **Сюжет (экспериментально):** шаги сюжетных потоков главы (то, что запускает события) у одного
-  повторяются у другого; при подключении гость получает весь прогресс главы хоста.
-- **Главы:** если хост ушёл в другую главу, гость через 5 секунд переходит туда же (с отсчётом на
-  экране); есть и кнопка «Go to partner's chapter».
-- **Замки, ключи, загадки, переключатели — сразу:** замок, открытый одним (ключом, жетоном, деталью),
-  тут же открывается и у другого — без сцены с его персонажем и не отнимая у него управление; предметы, вставленные в загадку,
-  засчитываются обоим; положения переключателей и другие состояния подтягиваются, когда напарник
-  рядом с ними. Загадку может решить любой из двоих — решение гостя засчитывается в игре хоста так же.
-  Решённая загадка сразу выглядит решённой и у напарника: шкафчик с монетами открыт (предмет внутри
-  можно взять), сейф с солнечным кварцем открыт, штриховка в блокноте показывает записку, в окне
-  двери «солнце / луна / звезда» видны вставленные эмблемы, лунный кварц выдвинут из шкафа.
-  Исключение: висячие лампы в Chap3_01 (свет, на который реагирует преследователь) могут погаснуть в
-  одной игре и продолжать гореть в другой; их выключатель общий.
-- **Рецепты крафта — обоим:** рецепт, открытый одним (записка с рецептом, анализ пробы крови на
-  лазерном микроскопе), открывается и у напарника (с пометкой «новое»).
-- **Не встал — очнулся рядом с напарником:** если вас не подняли за 30 секунд, вы приходите в себя
-  рядом с напарником (без экрана смерти).
-- **После смерти:** погибший продолжает с последнего сохранения, а напарник, который остался в игре,
-  досылает ему главу как она есть сейчас (сюжет, замки, загадки, ящик, рецепты, подобранные
-  предметы) — мир погибшего догоняет, а не откатывает напарника.
-- **Катсцены вместе:** пропустил один — пропускается и у второго.
-- **Где напарник:** точка с ником на карте игры («above» / «below» — другой этаж) и ник с расстоянием
-  у края экрана, когда напарника не видно.
-- **Выпавшее из врагов — общее:** предмет появляется у обоих в том же месте; кто подобрал — того и
-  предмет (или каждому свой при «каждому свои»).
-- **Переподключение:** если связь оборвалась (или игра вылетела и вы её перезапустили), мод сам
-  подключится снова: гость находит сессию хоста, хост создаёт её заново.
-- **Ящик:** если оба одновременно взяли одну вещь, она остаётся у хоста, у гостя дубль убирается.
-- **Боссы:** босса весь бой ведёт один игрок (тот, кто был ближе, когда босс появился), поэтому его
-  фазы и атаки не ломаются от передачи туда-сюда. Второй видит его движение в движение, его попадания
-  засчитываются. Босс переходит к другому, только если его игрок ушёл из боя.
-- **Катсцены:** пока у кого-то из вас катсцена, напарник скрыт и не мешает.
-- **Убитые враги:** враг, убитый одним игроком, мёртв и в игре второго (не «живой труп»).
-- **Без сознания вместо смерти:** пока напарник рядом (та же глава, на связи), смертельный удар
-  оставляет вас «при смерти»: двигаться и стрелять нельзя, враги больше не ранят. Напарник
-  **приседает рядом с вами 2,5 секунды** — вы встаёте с третью здоровья. Если напарник отключился или
-  без сознания оба — обычный экран смерти.
-- **Захват:** если вас схватил враг, напарник освобождает вас, **выстрелив в этого врага или ударив
-  его ножом/пинком рядом с вами** — захват сразу прерывается.
-- **Оружие и ключевые предметы — каждому:** оружие, ключевые предметы, файлы, карты, улучшения,
-  подобранные одним, остаются в мире для второго — он берёт свой экземпляр. Патроны, лечение и
-  материалы для крафта — общие (кто первый взял); в меню можно включить «каждому свои».
-- **Общий ящик предметов:** положили вещь в ящик — она появляется в ящике у напарника, и он может её
-  забрать (и наоборот). Оружие переносится вместе с заряженными патронами. Пока ящик у вас открыт,
-  изменения от напарника ждут, пока вы его закроете. Передаётся только то, что игрок сам сделал в
-  ящике (стартовые наборы, которые игра кладёт в ящики в начале глав, у каждого свои — без дублей).
-- **Гость играет в мире хоста (совместное прохождение):** гость входит в лобби из **главного меню**, а
-  не из своего сохранения. Игра хоста отправляет ему весь свой мир — так, как его записало бы
-  сохранение прямо сейчас (около 0,7 МБ): сюжет, просмотренные катсцены, подобранные предметы, врагов,
-  замки и загадки, карту, главу и место, где стоит хост. Игра гостя загружает его как своё сохранение:
-  гость появляется рядом с хостом в том же самом мире. Свои сохранения гостя не трогаются никогда:
-  файл сохранения только читается, а пока он играет у вас, его игра ничего не записывает в слоты.
-  Что гость несёт (вещи Леона и Грейс, патроны, деньги, сумки, экипировка) — его собственное: мод
-  хранит это для этого хоста в файле `reframework/data/re9coop_coop_<SteamID хоста>.json` (обновляется
-  при каждом сохранении хоста, раз в 2 минуты и при выходе из лобби) и возвращает при следующем входе.
-  В самый первый раз гость получает копию снаряжения хоста. Ящик — хоста. При каждом сохранении хоста
-  его мир снова уходит гостю; гибель или «Перезапустить» у гостя загружают последний мир хоста, а не
-  его собственное сохранение. Если у гостя нет ни одного сохранения, он начнёт новую игру в главе
-  хоста. Если гость вошёл в лобби из своей игры, мод попросит выйти в главное меню (до этого миры не
-  смешиваются).
-- **Совместное сохранение:** хост сохраняется как обычно (автосейвы, печатная машинка); каждый раз мод
-  заодно сохраняет вещи гостя.
-- **Проверка синхронизации:** кнопка «Check sync with partner» в меню мода (а у гостя сама — через минуту
-  после входа и потом каждые 5 минут) сравнивает две игры: сюжет, все загадки и замки, лежащие
-  предметы, врагов (жив ли, здоровье, где стоит) и то, как каждая игра показывает другого игрока. Итог
-  виден на экране и в логе, подробности — в файле `reframework/data/re9coop_sync_report.txt`. Если
-  что-то не так — пришлите этот файл с обеих сторон.
-- **Чёрный экран после перехода:** если после перехода в главу, начала совместного прохождения или
-  пропуска катсцены напарником экран остаётся чёрным дольше 20 секунд, мод снимает затемнение сам.
-
-### Как продолжить прохождение в другой день
-1. Хост запускает игру, выбирает **«Продолжить»** и создаёт сессию.
-2. Гость запускает игру, остаётся в **главном меню** и подключается (см. ниже).
-3. Игра гостя сама загружает мир хоста и ставит гостя рядом с ним; ящик — хоста, вещи гостя — из его
-   файла у мода.
-
-### Установка (оба игрока)
-1. Распакуйте архив в папку игры (где `re9.exe`), папка `reframework` сольётся с существующей. В архиве
-   всё, что нужно моду:
-   - `dinput8.dll` — REFramework, ночная сборка 01432 (коммит d052e8f), без изменений: на ней мод
-     проверен. Если REFramework у вас уже стоит, этот файл заменит ваш `dinput8.dll`.
-   - `reframework/autorun/re9coop_main.lua` и `reframework/plugins/re9coop_net.dll` — сам мод. Плагин
-     пользуется `steam_api64.dll` самой игры; ничего больше ставить не нужно (ни библиотек Visual C++,
-     ни Steamworks).
-   - `licenses/` — лицензия REFramework и лицензии библиотек внутри неё.
-2. Версия мода у обоих должна совпадать. Steam должен быть запущен (игре он нужен и так).
-
-### Как подключиться к лобби
-Меню мода: в игре нажмите **Insert** → *Script Generated UI* → **RE9 Co-op (online)**.
-
-**Хост (тот, чей мир и сюжет главные):**
-1. Загрузите сохранение.
-2. Если друг не у вас в друзьях Steam — поставьте галочку **Anyone with the ID can join**.
-3. Нажмите **Host a co-op session**.
-4. Пригласите друга одним из способов:
-   - **Invite friends (Steam overlay)** → выберите друга → «Пригласить»;
-   - или **Copy lobby ID** и отправьте этот номер другу в любой мессенджер.
-
-**Гость (друг):**
-1. Оставайтесь в **главном меню** (своё сохранение загружать не нужно: мод начнёт совместное
-   прохождение в главе хоста сам, ваши сохранения не тронет).
-2. Подключитесь одним из способов:
-   - примите приглашение в чате Steam (Shift+Tab) — мод подключится сам;
-   - или в меню мода **Refresh friends** → **Join <имя хоста>**;
-   - или вставьте номер в поле **Lobby ID** и нажмите **Join by ID**.
-3. Игра начнётся в главе хоста; через пару секунд вы увидите друг друга. Если далеко — **Teleport to
-   partner**. (Старый способ — со своего сохранения — остаётся, если снять галочку **Join as a co-op
-   playthrough from the main menu**.)
-
-Если не подключается:
-- «not a RE9 co-op lobby» / «host runs another mod version» — у вас разные версии мода;
-- друг не видит вашу сессию в списке — включите «Anyone with the ID can join» и подключайтесь по ID;
-- приглашения Steam работают только при включённом оверлее Steam;
-- проброс портов не нужен (соединение идёт через сеть Steam).
-
-**Self test** (флажок в меню) — проверка без друга: ваш персонаж повторяется «эхом» перед вами.
-
-### Удаление
-Удалите `reframework/autorun/re9coop_main.lua`, `reframework/plugins/re9coop_net.dll` и
-`reframework/data/re9coop_config.json`. `dinput8.dll` (REFramework) удалите, если других модов на
-REFramework у вас нет.
+- **Resident Evil Requiem** (Steam version, PC)
+- **Steam** running with Steam Overlay enabled (for Steam invites)
+- Both players must use the **exact same mod version** (`v0.12.9`)
+- Everything else needed (`dinput8.dll` REFramework nightly `01432`, Lua mod script, and `re9coop_net.dll`) is included in the release ZIP.
 
 ---
 
-## Tested
-With one PC (self-test echo + simulated partner messages), 2026-10-15:
-- Every chapter scene that can be loaded directly: Chap1_01, 1_10, 3_01, 3_02, 3_0304, 3_04, 3_05,
-  3_06, 3_10, 3_20, 3_324, 3_40, 4_1020, 4_20, 4_30, 4_4050, 5_02, 5_10 (Grace and Leon): the
-  partner's character builds, doors, items, gimmicks, triggers and enemies are found, no mod errors,
-  no crash over ~30 chapter changes. Chap5_03 / 5_04 / 5_05 and the ff scenes are only entered through
-  the story, so they weren't loaded directly.
-- Downed (a real zombie bite), revive, bleed-out game over; grab freed by the partner's hit and by
-  their melee; the item box through the game's own box screen; key-locked gate opened for the partner.
-- v0.8.0: the laser microscope (blood analysis puzzle) solved for real, then replayed as the partner:
-  the partner gets both recipes and can still use the microscope. A boss (the hospital's cp_C100,
-  6000 HP, 100 joints) as the partner's copy: woken and posed from the owner's data, real pistol hits
-  on it land on the owner's side, and it gets its AI back when it changes hands.
-- v0.9.0: going down and coming to next to the partner, a real game over and continue, the "I loaded"
-  / "I stayed" exchange and the resend, a real cutscene skipped from the partner's message and our
-  skip sent (both ways), the partner's dot on the game's map and the edge marker, an enemy-style drop
-  made in the partner's game and taken away by their pickup, reconnecting (net plugin stubbed).
-- v0.9.1: locks solved for real (a padlock, three security-tag doors, the sun / moon / star door)
-  and played back as the partner: every field of the lock matches, the partner's controls stay free;
-  the heart / lung slots again; every puzzle type of every loadable chapter checked for whether its
-  state follows the partner's data.
-- v0.9.2: a coin locker, the moon and sun quartz cabinets, the pencil rubbing and the hint panel
-  solved for real (by the game's own controls), then played back as the partner on a fresh game:
-  the locker's glass door opens and its item can be taken, the safe opens with its items, the
-  notebook shows the note and gives the document, the emblems show in the door window, and putting
-  in an emblem afterwards works as usual.
-- v0.10.0: a co-op playthrough on one PC (the host's side played through the self-test echo): from the
-  main menu a new game straight in Chap3_20 on the host's difficulty, the game's own autosave there
-  skipped by the mod (the save files unchanged), a copy of the host's things (the gun with its 9
-  rounds, 40 spare, the flamethrower, healing, equipped weapons, shortcuts), the guest's things kept
-  and given back when they joined again; the partner's hair (strand hair) on screen.
-- v0.11.0: the host's world sent and loaded on one PC: packed (36 save handlers, 707 KB), sent through
-  the net plugin's loopback in 12 pieces (1.4 s) and put back together; from the main menu, a save of
-  Leon in Chap3_20 loaded as the host's Chap3_02 with Grace, at the host's spot (within 0.1 m), moving
-  after the game's own fade-in; a "Load" inside the co-op playthrough brought the host's world back.
-  Packed and unpacked again, the world matched itself field for field.
-- v0.11.1: the sync check: our digest against itself 0 differences; a mutation twin (one story flow, one
-  gimmick field, one item, one enemy changed) showed exactly those four; a request answered through the
-  net plugin's loopback, report written (637 flows, 684 gimmicks, 155 items, 40 enemies in Chap3_02).
-- v0.11.2: as the host, a guest's message that locks an open lock again was refused (the lock stayed
-  open), the same message from the host still locked it on the guest; a guest's story step back was
-  refused (the flow stayed); the sync check again 0 differences against itself and exactly the 4 planted
-  ones in its mutation twin.
-- v0.11.3: in a host's save from a two-PC session four doors of Chap3_02 were held by a scene (event
-  mode); the button's steps, done by hand, let all four go, the three opened before unlocked again, the
-  fourth (never opened) stayed a locked door; the security office door then swung open when pushed (to
-  90 degrees). The button's own code, run in that game, found a door held again by hand and let it go.
-- v0.12.0: our own body's sounds replayed on the echo while walking: 11 to 22 sounds a walk reached the
-  echo and played (the player's sound container playing up to 7 at once against 5 without them, and
-  the recording shows a second step after each of ours); the echo destroyed while 7 of its sounds
-  played, no crash. Interactions: 49 replayable triggers indexed in Chap3_02 (7 switch on, 7 off, 35
-  crates); a partner's switch-on from our own state replayed (the switch changed), the same from
-  another state skipped; our own switch-off sent with its earlier state.
-- v0.12.1, two real games on one PC (tools/stand.py: a second game folder of hard links, the network
-  plugin's LAN test mode instead of Steam, lowest graphics in a window): the host continued from a save
-  and opened the lobby, the guest joined from its title screen and loaded the host's world (752 KB),
-  both built the other's character. Before the fix below the guest's sync check found 442 of 684 gimmicks
-  different (every false the host sent had come out true); after it: 0 story flows, 0 gimmicks, 0 items,
-  0 enemies different, each copy of the other player with 68 of 68 joints matched.
-- v0.12.2 on the stand: a zombie goes for whichever player is nearer: with the guest nearer the guest's
-  game ran it and it walked 16 m to the guest and hit them 3 times, with the host nearer 5 hits on the
-  host. The guest filmed the host being grabbed (the zombie holding and biting the host's character,
-  positions within 5 cm of the host's own game, the "Host is grabbed" hint shown); the guest's hit on
-  its copy of the zombie during the grab killed it in both games and ended the grab (rescues 1). After
-  a guest's game over, "Continue" loaded the host's world and both stood on the floor; a player moved
-  60 m under the floor was put back within a second.
-- v0.12.3 on the stand: the host walked into a door (-60 degrees), the guest's copy followed (-41 when
-  read) and both closed together; a drawer pulled out 0.3 m in the host's game came out in the guest's
-  (the guest 1.6 m from it) and was still out 8 s later.
-- v0.12.4 on the stand, the C100 boss (spawned at its arena in both games): it went for the host and
-  put them down, then moved to the guest's game and went for the guest.
-- v0.12.5 on the stand: both games in all 18 chapters a jump reaches (Grace's and Leon's, Chap1_01 to
-  Chap5_10), the guest following the host each time, 0 mod errors; items and enemies the same in every
-  sync check. Bosses C100, B052, B032, B700, C510, C610 and the B800 stalker, each spawned in the
-  host's game only: in the guest's game too, to the guest when the host went down, the hits on the
-  copy counted (C510: 25000, 17500, 10000, 2500, dead), dead in both games. The host killed for real:
-  their zombie went to the guest within 1.5 s.
-- v0.12.6 on the stand: the last boss after its own entrance scene fought the host, then the guest
-  when the host was down; hit through the guest's copy down to its death, its death scene, phase two,
-  the ending, the credits and the results screen in both games; the other ending; a co-op playthrough
-  from New Game (the guest with a save of their own joined from the title, 0 differences a minute
-  later); a guest joining a host in another chapter (Leon's Chap4_10) came in as Leon.
-- Over Steam (two real sessions) the host's world hasn't reached the guest yet: the guest then
-  starts in the host's chapter as a new game (0.12.7 waits longer, asks again and logs how much
-  came; it gives the guest the flashlight the host has).
-- Not yet: a two-PC session with the host's world arriving; in the last battle's second phase the coils the guest works in their
-  own game may not count for the host's (the host should work them).
+## Installation (Both Players)
 
-## How it works
-- `re9coop_net.dll` (REFramework plugin, C++): uses the game's own `steam_api64.dll` — a friends-only
-  Steam lobby (max 2–4 players), `ISteamNetworkingMessages` P2P through Steam's relay (no port
-  forwarding, IPs stay hidden), Steam invites and "Join game". It only accepts data from members of
-  your lobby.
-- Players: after animation every frame each game reads its player's 68-joint skeleton and sends it 20
-  times a second (~600 bytes, ~100 kbit/s), with the flashlight's position, direction and strength.
-  The partner's game builds a puppet from the same costume parts and skeleton file and plays the pose
-  back with a 120 ms buffer. Its flashlight and muzzle flash are copies of the game's own flashlight
-  light rig (lights created from scratch ignore their brightness).
-- Enemies: the lobby owner decides who runs each enemy — the nearer player, with 3 m of hysteresis so
-  enemies don't flip back and forth. The runner's game keeps the enemy's AI and sends its state 15
-  times a second (the 4 nearest the partner with their full skeleton). The other game spawns the same
-  enemy through its own spawn control (enemies are identified by their scene GUID), switches off its
-  think, lock-on and out-of-area drivers, warps it and writes the runner's skeleton over its
-  animation. Damage dealt to such a copy is caught and sent to the runner. When an enemy changes
-  hands it keeps its health. Bosses (cp_B700, C100, C510, C900, D100, D110, B052, C610) keep their
-  runner for the whole fight and always get their full skeleton; a boss that spawns asleep waiting for
-  its entrance is woken in the other game when the runner's is up. Expect ~300–400 kbit/s each way
-  with enemies.
-- Crafting recipes: `ItemManager._UnlockedCraftRecipeIDSet` is compared every 2 s; the names go to
-  the partner, whose game unlocks the missing ones with `unsealCraftRecipe`.
-- Doors: a door push (`GmDoorV3.addForce`) is replayed on the partner's copy of the same door.
-  Pickups: `ItemCore.notifyPickupped` here despawns the partner's copy through its `ItemContext`.
-- Gimmicks: ~700 `GimmickContext`s per chapter are fingerprinted a slice per frame (their bool / int
-  fields); changes travel as field lists and are applied with the game's own `store()` / `restore()`.
-  The lobby owner sends them all on join. Gimmick global bit flags are OR-ed.
-- Story: `LevelFlowManager.setProgressiveNumber` is hooked; the partner replays the step with
-  `requestChangeProgressiveNumber`. Chapter jumps use `MainGameFlowManager.setOverrideNextJumpScene` +
-  `LevelFlowManager.requestGameJump`.
+1. Download **`RE9_Coop_Online_v0.12.9.zip`** from the [GitHub Releases page](https://github.com/haisuts/re9-coop-online/releases/latest).
+2. Open your **Resident Evil Requiem** installation folder (the folder containing `re9.exe`, typically `...\steamapps\common\RESIDENT EVIL requiem BIOHAZARD requiem`).
+3. Extract the ZIP directly into that folder and allow folders/files to merge:
+   - `dinput8.dll` — REFramework nightly build `01432` (commit `d052e8f`), unmodified. Replaces an older `dinput8.dll` if you already have REFramework installed.
+   - `reframework/autorun/re9coop_main.lua` — Main co-op mod script.
+   - `reframework/plugins/re9coop_net.dll` — Native Steam lobby & P2P networking plugin (uses the game's own `steam_api64.dll`; no extra runtimes needed).
+   - `licenses/` — REFramework license and third-party notices.
+4. Launch **Resident Evil Requiem** through Steam.
 
-- Item box: both games' item boxes (`app.Inventory`, board types ItemBox / ShareItemBox) are read
-  twice a second; what changed goes to the partner as "+item" / "-item" operations, applied with
-  `addPanel` + `reloadDirect` / `removePanel`. Inventories are changed only inside the game's GUI update
-  (where the game's own item box moves items); changing them from REFramework's frame callbacks
-  crashed the game on a worker thread. On joining, the boxes are merged (nothing is lost).
-- Live gimmicks: the partner's gimmick fields are written straight into the context's live
-  `StructureData` objects (`StructureDataContainer._Structures`), the ones the running gimmick reads;
-  `GimmickContext.restore()` swaps in copies the running gimmick never sees. Locks: the interact
-  triggers a `GmLockV2` unlocks on (`_UnlockParams._TriggerName`: "UseKeyItem_Success", "TurnOff" sent
-  at the end of the key scene, ...) and the key-item success triggers are caught in
-  `InteractTrigger.onProcessEvent` and fired on the partner's copy of the gimmick (by context ID).
-- Saves: the host's save is noticed by `SaveServiceManager`'s serial number moving to a game slot; the
-  guest then runs `GuiManager.AutoSaveFlow.requestAutoSave` with the game's default settings (Auto
-  slot, empty or oldest).
+---
 
-## Roadmap
-1. Leon as the partner in Grace's chapters (and the reverse): the game creates one playable character
-   per chapter (LevelPlayerCreateController); a second one needs its resources loaded there.
-2. Bosses attacking the player who doesn't run them.
+## How to Play Together
 
-## Known limitations
-- Both players need the same chapter loaded; the partner is hidden while you're in different areas.
-- If both players take the same thing out of the item box at the same moment, the host keeps it and
-  the guest's copy is taken from their hands (if it's still there as it came out).
-- After a game over the player who died starts from their own last save; the partner's chapter state
-  is sent to them, but they still have to walk (or "Teleport to partner") back to them.
-- In a co-op playthrough a game over or "Restart" loads the host's last world (as it was when the host
-  last saved, or when the guest joined), not where the host is now: walk or "Teleport to partner".
-  Health upgrades come with the host's world, not the guest's own.
-- Gun sounds of a weapon the listener doesn't carry may be silent (its sound bank isn't loaded).
-- Of the items the game makes during play, only enemy drops are shared; anything else it spawns is
-  each player's own.
-- The hanging lamps in Chap3_01 (lights the stalker reacts to) can go out in one game and stay lit
-  in the other; their light switch is shared.
-- An enemy attacks the player whose game runs it: the nearer one; a boss the one it started with,
-  until that player is down or has left it (20 m off, the other one within 8 m), then the other.
-- Story sharing is experimental: a step can start a cutscene or move the other player.
-- Tested on one PC only, with a built-in self test (an echo of yourself, and a second enemy copying
-  the first through the network code). The first real two-PC session may still find problems — please
-  send `re2_framework_log.txt` from both games.
-- Don't use REFramework's *Reset scripts* button while co-op is on (it can crash the game); restart
-  the game instead.
+In-game, press **`Insert`** to open the REFramework menu, then open **`Script Generated UI` → `RE9 Co-op (online)`**.
 
-## Credits
-- REFramework by praydog and contributors (Lua scripting and plugin API), MIT License; shipped as
-  `dinput8.dll` with its license and third-party notices in `licenses/`.
-- File path list for RE9 paks: Ekey's REE.PAK.Tool project lists.
-- Built with Claude (Anthropic) using the universal-modder toolkit.
+### Host (Your World & Story Are Shared)
+1. Load your save (or start a **New Game**).
+2. *(Optional)* If your friend is not on your Steam friends list, enable **`Anyone with the ID can join`**.
+3. Click **`Host a co-op session`**.
+4. Invite your friend in one of two ways:
+   - Click **`Invite friends (Steam overlay)`** and invite them via Steam, **or**
+   - Click **`Copy lobby ID`** and send the Lobby ID to your friend.
+
+### Guest (Joining the Host's World)
+1. Stay on the **Main Menu** — do **not** load your own single-player save first. The mod automatically loads the host's world snapshot into your game without touching your personal save slots.
+2. Join using any method:
+   - Accept the Steam invite (`Shift+Tab`) — the mod joins automatically, **or**
+   - In the mod menu, click **`Refresh friends`** → **`Join <host name>`**, **or**
+   - Paste the host's Lobby ID into **`Lobby ID`** and click **`Join by ID`**.
+3. Your game receives the host's compressed world snapshot over Steam P2P and spawns you next to the host.
+4. If you spawn far apart, use **`Teleport to partner`** in the mod menu.
+
+### Continuing a Co-op Run on Another Day
+1. **Host:** Launch the game, click **Continue** to load your save, and click **`Host a co-op session`**.
+2. **Guest:** Launch the game, stay at the **Main Menu**, and join the host's lobby.
+3. The guest automatically receives the host's world again, and the mod restores the guest's own carried inventory/gear saved for that host (`reframework/data/re9coop_coop_<HostSteamID>.json`).
+
+---
+
+## Features
+
+- **Full-body partner puppet**: Costumes/hair, 68-joint animated poses, equipped weapon, muzzle flash, flashlight, footsteps, breathing, gun sounds, name tag with ping and HP%.
+- **Shared enemies & bosses**: Each enemy is simulated by the nearest player (with 3 m hysteresis); the partner sees a pose-synced puppet whose hits register on the owner. Bosses (`cp_B700`, `C100`, `C510`, `C900`, `D100`, `D110`, `B052`, `C610`) stay with one runner unless they go down/leave. Killed enemies (including already-despawned enemies when reconnecting) sync across both games.
+- **Shared world & progress**:
+  - Doors (`GmDoorV3`), drawers, levers, switches, breakables, and puzzle locks/counters (including coin lockers / parlor cabinets `Gm02_032`, sun/moon/star emblems, safes, and pencil rubbing).
+  - Story steps (`LevelFlowManager`), chapter transitions, and synchronized/skippable cutscenes.
+  - Crafting recipes unlocked by one player unlock for both.
+  - Shared item box (`ItemBox` / `ShareItemBox`) with live add/remove sync and merge on join.
+  - Weapons, key items, maps, and upgrades are per-player; ammo, healing, materials, and enemy drops are shared (or per-player via the menu toggle).
+  - **"Give your partner"** menu action drops healing/ammo/materials/subweapons from your hands in both games.
+- **Co-op survival & reconnect**:
+  - **Downed state**: Fatal hits put you into a downed state while your partner is alive nearby; crouching beside a downed partner for 2.5 s revives them (or auto-revive at partner after 30 s).
+  - **Grab rescue**: Shooting or meleeing an enemy grabbing your partner frees them immediately.
+  - **Auto-reconnect & out-of-bounds rescue**: Automatically rejoins after drops/crashes and pulls players back if they fall below the map.
+- **Sync Check diagnostic**: Automatic and manual (`Check sync with partner`) comparison of story flows, gimmicks, items, enemies, and player puppets, written to `reframework/data/re9coop_sync_report.txt`.
+
+---
+
+## Troubleshooting
+
+- **`not a RE9 co-op lobby` / `host runs another mod version`**: Both players must be on the exact same mod version (`v0.12.9`).
+- **Friend doesn't see the session**: Enable **`Anyone with the ID can join`** on the host and connect via **`Copy lobby ID`** → **`Join by ID`**.
+- **Steam invites don't open / fail**: Make sure the Steam Overlay is enabled in Steam settings for Resident Evil Requiem.
+- **Port forwarding**: Not required; traffic goes over Steam's `ISteamNetworkingMessages` relay / direct P2P.
+- **Script crash when clicking "Reset scripts"**: Do not use REFramework's *Reset scripts* button while co-op is active; restart the game instead.
+- **Logs & diagnostics**: Check `re2_framework_log.txt` in the game folder and `reframework/data/re9coop_sync_report.txt` from both players when debugging issues.
+
+---
+
+## Uninstall
+
+Delete the following files from your Resident Evil Requiem folder:
+- `reframework/autorun/re9coop_main.lua`
+- `reframework/plugins/re9coop_net.dll`
+- `reframework/data/re9coop_config.json` (and optional `re9coop_coop_*.json` / `re9coop_sync_report.txt`)
+- Delete `dinput8.dll` only if you do not use any other REFramework mods.
+
+---
+
+## Known Limitations
+
+- Both players must be in the same chapter; the partner puppet is hidden across area/chapter boundaries until both load into the same area.
+- Sound effects for a weapon the listener does not hold may not play if its sound bank is not loaded in memory.
+- Hanging lamps in `Chap3_01` can desync visually between clients; their shared light switch stays synced.
+
+---
+
+## Changelog Highlights
+
+- **v0.12.9**: Fixed shared pickups reappearing after reconnect (`ext.send_pickups` now includes already-taken shared items in `world.items` + `world.pending_taken` queue), fixed dead/despawned zombies staying alive or lying frozen on reconnect (`MSG.ENEMIES_DEAD` + `foes.kill_step`), improved shared item box change detection (`app.Inventory` hooks + `_GuiItemBoxHandle` + 10 s window), and fixed parlor coin counter `Gm02_032` (`_LeftUsageCount`) live sync in `gim.catch_up`.
+- **v0.12.8 (`net 0.3.3`)**: Added MSZIP world-snapshot compression (`~765 KB -> ~131 KB`), Steam relay status & direct/relay P2P diagnostics, pinned host lobby key, and auto-reset of broken P2P sessions.
+
+---
+
+## Credits & AI Disclosure
+
+- **REFramework** by praydog and contributors (MIT License), bundled unmodified as `dinput8.dll` with notices in `licenses/`.
+- Inspired by *RE2 Co-op: HUNK* (Nexus Mods #2938); no code reused.
+- RE9 file path lists reference Ekey's `REE.PAK.Tool` project.
+- Built and verified with AI coding agents (Claude by Anthropic and Gemini / Antigravity) using the `universal-modder` toolkit.

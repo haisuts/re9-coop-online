@@ -16,8 +16,8 @@
 -- * Enemies: each one is run by the player it's closest to; the other game spawns a copy, switches
 --   its AI off and poses it from the runner's data; damage dealt to a copy goes to the runner.
 
-local VERSION = "0.12.7"
-local PROTO = 15
+local VERSION = "0.12.9"
+local PROTO = 16
 local CONFIG_FILE = "re9coop_config.json"
 local TAG = "[re9coop] "
 
@@ -353,7 +353,7 @@ local MSG_GIMMICK, MSG_GIMMICK_FLAGS = 19, 20
 local MSG_STORY = 21
 local MSG = { BOX = 22, SAVE = 23, GIMMICK_TRIGGER = 24, REVIVE = 25, RESCUE = 26, RECIPES = 27,
     CUTSCENE = 28, LOADED = 29, STORY_FWD = 30, DROP = 31, DROP_TAKEN = 32, PLAY_REQ = 33, PLAY = 34, KIT = 35, WORLD = 36, CHECK_REQ = 37, CHECK = 38,
-    BODY_SOUND = 39, DOOR_ANGLE = 41, GIM_JOINT = 42, SCENE = 43, CUT_PLAY = 44 }
+    BODY_SOUND = 39, DOOR_ANGLE = 41, GIM_JOINT = 42, SCENE = 43, CUT_PLAY = 44, ENEMIES_DEAD = 45 }
 local FLAG_CUTSCENE = 64
 local FLAG_DOWN, FLAG_GRABBED = 128, 256
 -- 512 (written as a number where used: the main chunk is at its 200 locals): off the ground, falling or
@@ -954,7 +954,7 @@ local function on_ctrl(from, data)
         p.rtt = now() - t
     elseif kind == MSG_BYE then
         drop_peer(from)
-    elseif kind >= MSG_ENEMY and kind <= MSG_ENEMY_PRESENCE and enemy_ctrl then
+    elseif (kind >= MSG_ENEMY and kind <= MSG_ENEMY_PRESENCE or kind == MSG.ENEMIES_DEAD) and enemy_ctrl then
         enemy_ctrl(from, kind, data)
     elseif (kind == MSG_DOOR or kind == MSG_ITEM_TAKEN or kind == MSG.DOOR_ANGLE or kind == MSG.GIM_JOINT) and world_ctrl then
         ext.later(function() world_ctrl(from, kind, data) end)
@@ -1115,6 +1115,13 @@ local foes = {
     -- arbiter
     next_arbitrate = 0, next_full_owners = 0,
     presence = {},         -- id -> { pos, dead, t } enemies the other player has spawned
+    dead = {},             -- id -> true: dead in this chapter here
+    peer_dead = {},        -- id -> true: partner reported dead in this chapter
+    peer_killed = {},      -- id -> true: peer_dead enemy already killed here
+    peer_kill_t = {},      -- id -> next retry time
+    peer_kill_tries = {},  -- id -> retry count
+    dead_sent_for = nil,   -- peer id we sent our dead list to in this chapter
+    next_dead_scan = 0,
     -- kind -> true: run by one player for the whole fight (see owner_decision). Picked from the chapter
     -- sweep (one of its kind in a chapter) and their own types: B700 (battle area), C100 (phase
     -- driver), C510 (car throws, parries), C900 (slams, with C901 adds), D100 (rocket launcher,
@@ -1218,6 +1225,8 @@ enemies_reset = function(scene_alive)
     end
     foes.puppets, foes.hp_owner, foes.ctl_owner, foes.states, foes.joints = {}, {}, {}, {}, {}
     foes.index, foes.index_t, foes.skel_sent, foes.owner, foes.presence = {}, 0, {}, {}, {}
+    foes.dead, foes.peer_dead, foes.peer_killed = {}, {}, {}
+    foes.peer_kill_t, foes.peer_kill_tries, foes.dead_sent_for, foes.next_dead_scan = {}, {}, nil, 0
 end
 
 -- Only after the spawn has completed with its AI on: turning AI off earlier leaves it asleep.
@@ -1422,9 +1431,10 @@ local function arbitrate(t_now)
         local cur = foes.owner[id]
         local pr = foes.presence[id]
         local there = pr ~= nil and t_now - pr.t < 1.5
-        local want = owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0,
-            foes.bosses[kind] == true, here, there, me.down == true or me.dead == true,
-            p ~= nil and (p.flags or 0) & (FLAG_DOWN | 1024) ~= 0)
+        local want = (dead or foes.dead[id]) and here
+            or owner_decision(cur, together, dead, together and (pos - my):length() or 0, together and (pos - ppos):length() or 0,
+                foes.bosses[kind] == true, here, there, me.down == true or me.dead == true,
+                p ~= nil and (p.flags or 0) & (FLAG_DOWN | 1024) ~= 0)
         if want ~= cur then
             set_owner(id, want)
             changes[#changes + 1] = { id, not want } -- sent from the guest's point of view
@@ -1434,10 +1444,26 @@ local function arbitrate(t_now)
         if e.ctx:call("get_IsSpawn") then
             local go = e.ctx:call("get_GameObject")
             if go then decide(id, go:call("get_Transform"):call("get_Position"), e.ctx:call("get_IsDead"), e.kind, true) end
+        elseif e.ctx:call("get_IsDead") or foes.dead[id] then
+            foes.dead[id] = true
+            seen[id] = true
+            if foes.owner[id] ~= true then
+                set_owner(id, true)
+                changes[#changes + 1] = { id, false }
+            end
         end
     end
     for id, pr in pairs(foes.presence) do
-        if not seen[id] and t_now - pr.t < 1.5 then decide(id, pr.pos, pr.dead, foes.index[id] and foes.index[id].kind, false) end
+        if not seen[id] and t_now - pr.t < 1.5 then
+            if foes.dead[id] then
+                if foes.owner[id] ~= true then
+                    set_owner(id, true)
+                    changes[#changes + 1] = { id, false }
+                end
+            else
+                decide(id, pr.pos, pr.dead, foes.index[id] and foes.index[id].kind, false)
+            end
+        end
     end
     -- a full list now and then, in case something was missed
     if t_now >= foes.next_full_owners then
@@ -1533,6 +1559,14 @@ enemy_ctrl = function(from, kind, data)
             id, x, y, z, dead, pos = string.unpack("<s1fffB", data, pos)
             foes.presence[id] = { pos = Vector3f.new(x, y, z), dead = dead == 1, t = t }
         end
+    elseif kind == MSG.ENEMIES_DEAD then
+        local _, chapter, n, pos = string.unpack("<Bs1H", data)
+        if chapter ~= me.chapter then return end
+        for _ = 1, n do
+            local id
+            id, pos = string.unpack("<s1", data, pos)
+            foes.peer_dead[id] = true
+        end
     end
 end
 
@@ -1583,6 +1617,40 @@ local function peer_render_time(t_now)
     return t_now - p.off - cfg.interp_delay
 end
 
+foes.kill_step = function(id, e, tries)
+    if not e.ctx:call("get_IsSpawn") then return tries, false end
+    if e.ctx:call("get_IsDead") then return tries, true end
+    local ctl = spawn_control(e)
+    local go = ctl and ctl:call("getSpawnInstance")
+    if go == nil or not ctl:call("get_HasCompletedSpawn") then return tries, false end
+    if not go:call("get_UpdateSelf") then
+        go:call("set_UpdateSelf", true)
+        return tries, false
+    end
+    tries = tries + 1
+    if foes.puppets[id] then release_puppet(id, true) end
+    -- what it drops comes from the owner's game (see "enemy drops")
+    if cfg.share_drops then pcall(e.ctx.set_field, e.ctx, "<IsPermitedItemDropnOnDead>k__BackingField", false) end
+    local hp = e.ctx:call("get_HitPoint")
+    local boss = foes.bosses[e.kind] == true
+    if hp and boss then
+        if ext.empty_u32 == nil then
+            local okm, a = pcall(sdk.create_managed_array, "System.UInt32", 0)
+            ext.empty_u32 = okm and a and a:add_ref_permanent() or false
+        end
+        if ext.empty_u32 then
+            pcall(function()
+                hp:get_field("<NoDeath>k__BackingField"):call("applyRequestHashSet(System.UInt32[])", ext.empty_u32)
+            end)
+        end
+        pcall(hp.call, hp, "set_Invincible", false)
+    end
+    local cur = hp and hp:call("get_CurrentHitPoint") or 0
+    apply_damage(e, 0, math.max(1, cur) + 100, false, not boss or tries > 2)
+    if tries >= 6 and not e.ctx:call("get_IsDead") and ctl then ctl_request(ctl, "requestKill") end
+    return tries, tries >= 8 or e.ctx:call("get_IsDead")
+end
+
 -- Before animation: spawn / put away / puppetize / keep awake / warp the enemies they own.
 local function enemies_tick(t_now)
     refresh_index(t_now)
@@ -1599,29 +1667,8 @@ local function enemies_tick(t_now)
         -- down. The empty array for that is made once and kept: one made for each call was freed by
         -- Lua while the game still held it (a guest's game crashed 47 s after the first one).
         if e and foes.owner[id] == false and st.flags & F_DEAD ~= 0 and not st.killed and t_now >= (st.kill_t or 0) then
-            st.kill_tries, st.kill_t = (st.kill_tries or 0) + 1, t_now + 0.5
-            if foes.puppets[id] then release_puppet(id, true) end
-            if e.ctx:call("get_IsSpawn") and not e.ctx:call("get_IsDead") then
-                -- what it drops comes from the owner's game (see "enemy drops")
-                if cfg.share_drops then pcall(e.ctx.set_field, e.ctx, "<IsPermitedItemDropnOnDead>k__BackingField", false) end
-                local hp = e.ctx:call("get_HitPoint")
-                local boss = foes.bosses[e.kind] == true
-                if hp and boss then
-                    if ext.empty_u32 == nil then
-                        local okm, a = pcall(sdk.create_managed_array, "System.UInt32", 0)
-                        ext.empty_u32 = okm and a and a:add_ref_permanent() or false
-                    end
-                    if ext.empty_u32 then
-                        pcall(function()
-                            hp:get_field("<NoDeath>k__BackingField"):call("applyRequestHashSet(System.UInt32[])", ext.empty_u32)
-                        end)
-                    end
-                    pcall(hp.call, hp, "set_Invincible", false)
-                end
-                local cur = hp and hp:call("get_CurrentHitPoint") or 0
-                apply_damage(e, 0, math.max(1, cur) + 100, false, not boss or st.kill_tries > 2)
-            end
-            if st.kill_tries >= 8 or e.ctx:call("get_IsDead") or not e.ctx:call("get_IsSpawn") then st.killed = true end
+            st.kill_t = t_now + 0.5
+            st.kill_tries, st.killed = foes.kill_step(id, e, st.kill_tries or 0)
         end
         if e and foes.owner[id] == false and not st.killed then
             local pup = foes.puppets[id]
@@ -1650,13 +1697,24 @@ local function enemies_tick(t_now)
         end
         if t_now - st.last > 10 then foes.states[id] = nil end
     end
+    -- dead enemies reported by partner (including ones already despawned on partner's side)
+    for id in pairs(foes.peer_dead) do
+        local e = foes.index[id]
+        if e and not foes.peer_killed[id] and t_now >= (foes.peer_kill_t[id] or 0) then
+            foes.peer_kill_t[id] = t_now + 0.5
+            local tries, done = foes.kill_step(id, e, foes.peer_kill_tries[id] or 0)
+            foes.peer_kill_tries[id] = tries
+            if done then foes.peer_killed[id] = true end
+        end
+    end
     -- what's alive here: ours keep their AI; theirs become puppets (put away if they don't send it)
     for id, e in pairs(foes.index) do
         local considered = foes.test == nil or id == foes.test.dst
         if considered and e.ctx:call("get_IsSpawn") then
             if foes.owner[id] == nil and foes.test == nil then foes.owner[id] = true end
-            if foes.owner[id] == false and not e.ctx:call("get_IsDead") then
-                local st = foes.states[id]
+            local st = foes.states[id]
+            if foes.owner[id] == false and not e.ctx:call("get_IsDead") and not foes.peer_dead[id]
+                and not (st and st.flags & F_DEAD ~= 0) then
                 if foes.puppets[id] == nil then
                     puppetize(id, e, st ~= nil and t_now - st.last < 1.0 and st.flags & F_SPAWNED ~= 0)
                 end
@@ -1758,6 +1816,33 @@ local function enemies_update(t_now)
     if foes.active and me.go then enemies_tick(t_now) end
 end
 
+foes.sync_dead = function(t_now)
+    if me.chapter == "" or foes.test ~= nil then return end
+    local need_full = foes.dead_sent_for ~= foes.peer_id
+    if not need_full and t_now < (foes.next_dead_scan or 0) then return end
+    foes.next_dead_scan = t_now + 0.5
+    refresh_index(t_now)
+    if next(foes.index) == nil then return end
+    local newly = {}
+    for id, e in pairs(foes.index) do
+        if e.ctx:call("get_IsDead") and not foes.dead[id] then
+            foes.dead[id] = true
+            newly[#newly + 1] = id
+        end
+    end
+    local to_send = need_full and {} or newly
+    if need_full then
+        foes.dead_sent_for = foes.peer_id
+        for id in pairs(foes.dead) do to_send[#to_send + 1] = id end
+    end
+    for i = 1, #to_send, 50 do
+        local j = math.min(#to_send, i + 49)
+        local t = { string.pack("<Bs1H", MSG.ENEMIES_DEAD, me.chapter, j - i + 1) }
+        for k = i, j do t[#t + 1] = string.pack("<s1", to_send[k]) end
+        send_ctrl(table.concat(t), foes.peer_id)
+    end
+end
+
 -- called after animation
 local function enemies_late(t_now)
     if not foes.active or me.go == nil then return end
@@ -1766,6 +1851,7 @@ local function enemies_late(t_now)
     if foes.arbiter and not foes.test then arbitrate(t_now) end
     if together then
         send_owned(t_now)
+        foes.sync_dead(t_now)
         if not foes.arbiter and not foes.test then send_presence(t_now) end
     end
     puppets_pose(t_now)
@@ -1820,11 +1906,13 @@ world = {
     sent_at = {},               -- door id -> when we last sent a push (rate limit)
     out = {},
     taken = {},                 -- item id -> true: what we picked up in this scene (shared kinds)
+    pending_taken = {},         -- item id -> chapter: taken msgs received before item/scene was ready
     stats = { doors_sent = 0, doors_applied = 0, items_sent = 0, items_applied = 0 },
 }
 
 world_reset = function()
     world.doors, world.door_ids, world.items, world.item_ids, world.taken = {}, {}, {}, {}, {}
+    world.pending_taken = {}
     world.index_t, world.applied_at, world.sent_at, world.out = 0, {}, {}, {}
 end
 
@@ -2017,6 +2105,7 @@ local function item_category(core)
     return cat or nil
 end
 world.item_category = item_category
+world.PERSONAL = PERSONAL
 
 sdk.hook(M_ITEM_PICKED, function(args)
     if world.applying or not world_shared() or (sdk.to_int64(args[3]) & 1) == 0 then return end
@@ -2056,7 +2145,11 @@ world_ctrl = function(from, kind, data)
     elseif kind == MSG_ITEM_TAKEN then
         local _, chapter, id = string.unpack("<Bs1s1", data)
         local item = chapter == me.chapter and world.items[id]
-        if not item then return end
+        if not item then
+            world.pending_taken[id] = chapter
+            return
+        end
+        world.pending_taken[id] = nil
         local ctx = item:get_field("_Context")
         if ctx and ctx:call("get_IsSpawn") then
             world.applying = true
@@ -2070,6 +2163,25 @@ end
 world_late = function(t_now)
     if not world_shared() then return end
     refresh_world(t_now)
+    if next(world.pending_taken) ~= nil then
+        for id, chapter in pairs(world.pending_taken) do
+            if chapter ~= me.chapter then
+                world.pending_taken[id] = nil
+            else
+                local item = world.items[id]
+                if item then
+                    world.pending_taken[id] = nil
+                    local ctx = item:get_field("_Context")
+                    if ctx and ctx:call("get_IsSpawn") then
+                        world.applying = true
+                        pcall(ctx.call, ctx, "set_IsSpawn", false)
+                        world.applying = false
+                        world.stats.items_applied = world.stats.items_applied + 1
+                    end
+                end
+            end
+        end
+    end
     world.angle_scan(t_now)
     if ext.joint_scan then pcall(ext.joint_scan, t_now) end
     if #world.out == 0 then return end
@@ -2271,8 +2383,9 @@ gim = {
     -- { component, data type, data field, runtime field (nil: once per chapter), method, lowest number };
     -- a true data field catches up a false runtime one, a number (from the lowest on) any other number
     catch_up = {
-        -- coin lockers: the glass door opens and the item inside can be taken
+        -- coin lockers: the glass door opens and the remaining-coin counter updates as coins go in
         { sdk.typeof("app.Gm02_032"), "app.structure.Gm02_032Data", "_Unlock", "_Unlock", "onStart" },
+        { sdk.typeof("app.Gm02_032"), "app.structure.Gm02_032Data", "_LeftUsageCount", "_LeftUsageCount", "onStart" },
         -- the safe with the sun quartz: its door opens
         { sdk.typeof("app.Gm99_102"), "app.structure.Gm99_102Data", "_Success", nil, "reformOpenState" },
         -- the pencil rubbing: the notebook opens shaded, with the note
@@ -3412,6 +3525,7 @@ box = {
     next_scan = 0,
     gimmicks = {}, gimmicks_t = 0, gimmicks_chapter = "",
     full_done_for = nil,
+    applying = false,
     my_takes = {},      -- "box key|panel" -> when we took that out (both taking it: see apply_ops)
     stats = { sent = 0, applied = 0, races = 0 },
 }
@@ -3595,11 +3709,33 @@ local function diff_ops(old, list, counts)
 end
 
 -- the box screen at work
-for _, m in ipairs(sdk.find_type_definition("app.GuiItemBoxModel"):get_methods()) do
-    if ({ setup = 1, canStore = 1, collectHasItem = 1, makeItemData = 1 })[m:get_name()] then
-        sdk.hook(m, function() box.used_t = now() end, nil)
+(function()
+    for _, m in ipairs(sdk.find_type_definition("app.GuiItemBoxModel"):get_methods()) do
+        if ({ setup = 1, canStore = 1, collectHasItem = 1, makeItemData = 1, applySort = 1, tryGroundItem = 1, makeFloatHandle = 1 })[m:get_name()] then
+            sdk.hook(m, function() box.used_t = now() end, nil)
+        end
     end
-end
+    local T_INV = sdk.find_type_definition("app.Inventory")
+    local function on_inv_touch(args)
+        if box.applying or not world_shared() then return end
+        local inv = sdk.to_managed_object(args[2])
+        local k = inv and inv:get_field("_InventoryKey")
+        local board = k and k:get_field("_BoardType")
+        if board and BOX_BOARDS[board] and not k:get_field("_IsTemporal") then
+            box.used_t = now()
+        end
+    end
+    for _, sig in ipairs({
+        SIG_ADD,
+        "addPanel(app.ItemAmountData, via.Int2, app.InventoryPanelRotateType, app.ItemStockChangedEventType)",
+        SIG_REMOVE,
+        "placePanel(app.Inventory.PanelItemInfo)",
+        "pickPanel(app.Inventory.PanelItemInfo)",
+    }) do
+        local m = T_INV and T_INV:get_method(sig)
+        if m then sdk.hook(m, on_inv_touch, nil) end
+    end
+end)()
 
 -- true while one of the item boxes here is in use (its menu may be open)
 local function box_in_use(t_now)
@@ -3609,7 +3745,8 @@ local function box_in_use(t_now)
     end
     for _, g in ipairs(box.gimmicks) do
         local ok, idle = pcall(g.call, g, "get_IsStepTypeNone")
-        if ok and idle == false then
+        local okh, handle = pcall(g.get_field, g, "_GuiItemBoxHandle")
+        if (ok and idle == false) or (okh and handle ~= nil) then
             box.used_t = t_now
             return true
         end
@@ -3668,7 +3805,7 @@ box.late = function(t_now)
     local invs = box_inventories()
     -- our own changes first, so the partner's below aren't taken for ours (sent only when the player
     -- used a box just now)
-    local in_use = box_in_use(t_now) or t_now - (box.used_t or -10) < 3
+    local in_use = box_in_use(t_now) or t_now - (box.used_t or -10) < 10
     for key, inv in pairs(invs) do
         local list, counts = read_box(inv)
         local old = box.known[key]
@@ -3692,11 +3829,13 @@ box.late = function(t_now)
             local inv = invs[m.key]
             if inv then
                 local ok, err
+                box.applying = true
                 if m.flag == FLAG_JOIN then
                     ok, err = pcall(join_merge, m.key, inv, m.ops, m.from)
                 else
                     ok, err = pcall(apply_ops, inv, m.ops, m.key)
                 end
+                box.applying = false
                 if not ok and tostring(err):find("unreadable", 1, true) then
                     box.queue[#box.queue + 1] = m -- nothing was applied: next time
                 else
@@ -3992,6 +4131,7 @@ ext.on_peer_left = function(id)
     if box.full_done_for == id then box.full_done_for = nil end
     if ext.recipes and ext.recipes.peer == id then ext.recipes.peer = nil end
     if sync.resync_to == id then sync.resync_to = nil end
+    if foes.dead_sent_for == id then foes.dead_sent_for = nil end
     sync.pickups_sent = sync.pickups_sent or {}
     sync.pickups_sent[id] = nil
 end
@@ -4001,10 +4141,24 @@ ext.send_pickups = function(to)
     sync.pickups_sent = sync.pickups_sent or {}
     if sync.pickups_sent[to] == me.chapter then return 0 end
     sync.pickups_sent[to] = me.chapter
-    local n = 0
+    world.refresh(now())
+    local n, sent = 0, {}
     for id in pairs(world.taken) do
         send_ctrl(string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id), to)
-        n = n + 1
+        sent[id], n = true, n + 1
+    end
+    if not cfg.pickups_for_both then
+        for id, core in pairs(world.items) do
+            if not sent[id] and not world.PERSONAL[world.item_category(core) or ""] then
+                local ctx = core:get_field("_Context")
+                local ss = core:get_field("_SpawnStatus")
+                if ctx and not ctx:call("get_IsSpawn")
+                    and ((ss and (ss:get_field("_SpawnLapTime") or 0) > 0) or core:get_field("_VanishHasAcquired") == true) then
+                    send_ctrl(string.pack("<Bs1s1", MSG_ITEM_TAKEN, me.chapter, id), to)
+                    n = n + 1
+                end
+            end
+        end
     end
     return n
 end
@@ -4803,7 +4957,7 @@ local SHORTCUTS = { "Equip_Up", "Equip_Up2", "Equip_Down", "Equip_Down2", "Equip
 local PLAY_START, PLAY_KIT, PLAY_WORLD = 1, 2, 3
 -- not taken from the host's world: inventories (the guest's own things), achievements, flashlight settings
 local WORLD_KEEP = { InventoryManager = true, AchievementManager = true, LayeredParamManager = true }
-local WORLD_CHUNK = 60000
+local WORLD_CHUNK = 16384
 local CAT_SYSTEM = 1 -- app.SaveSlotCategory.System
 local title_controller -- below
 local fresh = {
@@ -4847,34 +5001,48 @@ local function world_blob()
     return json.dump_string(ext.worldx.encode(roots))
 end
 
--- send our world to `to` (a few pieces a frame; a piece Steam can't take yet is tried again)
+-- send our world to `to` (compressed, paced so Steam's P2P session isn't flooded)
 local function send_world(to)
     ext.later(function()
-        local ok, blob = pcall(world_blob)
-        if not ok then say("couldn't pack the world: %s", tostring(blob)) return end
+        local ok, raw = pcall(world_blob)
+        if not ok then say("couldn't pack the world: %s", tostring(raw)) return end
+        local comp = net and net.compress and net.compress(raw) or nil
+        local blob = comp and ("\1" .. comp) or ("\0" .. raw)
         fresh.world_tag = (fresh.world_tag % 60000) + 1
         local chunks = {}
         for i = 1, #blob, WORLD_CHUNK do chunks[#chunks + 1] = blob:sub(i, i + WORLD_CHUNK - 1) end
-        fresh.out = { to = to, tag = fresh.world_tag, chunks = chunks, next = 1, size = #blob }
+        fresh.out = { to = to, tag = fresh.world_tag, chunks = chunks, next = 1, size = #blob, raw_size = #raw, t0 = now(), next_t = 0 }
+        say("packing world for partner: %d KB -> %d KB (%d pieces)", #raw // 1024, #blob // 1024, #chunks)
     end)
 end
 ext.fresh_send_world = send_world
 
+local function peer_conn_state(id)
+    local st = session.status
+    for _, m in ipairs((st and st.members) or {}) do
+        if m.id == id then return m.conn_state or 0 end
+    end
+    return 0
+end
+
 local function pump_world()
     local o = fresh.out
     if o == nil or net == nil then return end
-    for _ = 1, 2 do
-        local c = o.chunks[o.next]
-        if c == nil then
-            fresh.out = nil
-            say("sent your world to your partner (%d KB, %d pieces%s)", o.size // 1024, #o.chunks,
-                (o.waits or 0) > 0 and string.format("; Steam's queue was full %d times", o.waits) or "")
-            return
-        end
-        local n = net.send(string.pack("<BI2I2I2s4", MSG.WORLD, o.tag, o.next, #o.chunks, c), true, CH_CTRL, o.to)
-        if (n or 0) <= 0 then o.waits = (o.waits or 0) + 1 return end -- Steam's queue is full: this piece again next frame
-        o.next = o.next + 1
+    local t = now()
+    if t < (o.next_t or 0) then return end
+    local cs = peer_conn_state(o.to)
+    if (cs == 1 or cs == 2) and t - (o.t0 or t) < 15 then return end -- wait for P2P handshake before sending
+    local c = o.chunks[o.next]
+    if c == nil then
+        fresh.out = nil
+        say("sent your world to your partner (%d KB, %d pieces%s)", o.size // 1024, #o.chunks,
+            (o.waits or 0) > 0 and string.format("; Steam's queue was full %d times", o.waits) or "")
+        return
     end
+    local n = net.send(string.pack("<BI2I2I2s4", MSG.WORLD, o.tag, o.next, #o.chunks, c), true, CH_CTRL, o.to)
+    if (n or 0) <= 0 then o.waits = (o.waits or 0) + 1 o.next_t = t + 0.05 return end
+    o.next = o.next + 1
+    o.next_t = t + 0.03
 end
 
 -- does this game have a save to load ("Continue")?
@@ -5261,8 +5429,16 @@ ext.fresh_ctrl = function(from, kind, data)
         end
         if pt.got < pt.total then return end
         fresh.parts = nil
-        local blob = table.concat(pt.chunks)
+        local raw_blob = table.concat(pt.chunks)
         ext.later(function()
+            local blob = raw_blob
+            local flag = blob:byte(1)
+            if flag == 1 then
+                blob = net and net.decompress and net.decompress(blob:sub(2)) or nil
+                if blob == nil then say("couldn't decompress the host's world") return end
+            elseif flag == 0 then
+                blob = blob:sub(2)
+            end
             local okj, enc = pcall(json.load_string, blob)
             if not okj or type(enc) ~= "table" then say("the host's world didn't arrive whole") return end
             local okd, roots, missing, objs = pcall(ext.worldx.decode, enc)
@@ -5389,10 +5565,25 @@ ext.fresh_late = function(t_now)
     if me.go == nil then
         -- at the main menu: ask the host where it is
         if not fresh.active and fresh.title and (fresh.phase == nil or (fresh.phase == "asked" and t_now - fresh.t > 5)) then
-            send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_START), st.owner)
+            local prev_phase = fresh.phase
+            local sent = send_ctrl(string.pack("<BB", MSG.PLAY_REQ, PLAY_START), st.owner)
             fresh.phase, fresh.t = "asked", t_now
+            if prev_phase == nil then
+                say("asking host %s to start co-op playthrough...", tostring(st.owner))
+            end
+            local _ = sent
+        elseif not fresh.active and not fresh.title and not fresh.wait_menu_logged then
+            fresh.wait_menu_logged = true
+            say("in lobby (waiting for main menu before joining co-op)")
         end
         return
+    end
+    fresh.wait_menu_logged = nil
+    if ext.fresh_hold() and not fresh.hold_logged then
+        fresh.hold_logged = true
+        say("in host's lobby on your own save: return to the main menu to join co-op")
+    elseif not ext.fresh_hold() then
+        fresh.hold_logged = nil
     end
     if not fresh.active then return end
     if fresh.phase == "starting" and me.chapter ~= "" then
@@ -6209,11 +6400,47 @@ local function tick_session(t_now)
     if net == nil then return end
     local st = net.status()
     session.status = st
+    -- Log Steam relay / P2P connection state transitions so any connection failure is visible in the log.
+    if st.relay_avail and st.relay_avail ~= 0 and st.relay_avail ~= session.relay_avail then
+        session.relay_avail = st.relay_avail
+        local rnames = { [100] = "Current", [3] = "Attempting", [2] = "Waiting", [1] = "NeverTried", [-10] = "Retrying", [-100] = "Previously", [-101] = "Failed", [-102] = "CannotTry" }
+        say("Steam relay: %s (%d)%s", rnames[st.relay_avail] or "?", st.relay_avail, (st.relay_msg and st.relay_msg ~= "") and (" - " .. st.relay_msg) or "")
+    end
+    if st.session_fail and st.session_fail ~= "" and st.session_fail ~= session.session_fail then
+        session.session_fail = st.session_fail
+        say("Steam P2P session failed: %s", st.session_fail)
+    end
+    if st.send_fail and st.send_fail > (session.send_fail or 0) and (t_now >= (session.next_fail_log or 0)) then
+        session.send_fail = st.send_fail
+        session.next_fail_log = t_now + 5
+        say("Steam send refused (%d total, last EResult %d)", st.send_fail, st.last_send_err or 0)
+    end
     if st.state == "in_lobby" then
+        if st.owner ~= "" and st.owner ~= session.last_owner then
+            session.last_owner = st.owner
+            say("lobby %s: host is %s%s", st.lobby, st.owner, st.is_host and " (you)" or "")
+        end
+        session.conn_states = session.conn_states or {}
+        local cnames = { [0] = "None", [1] = "Connecting", [2] = "FindingRoute", [3] = "Connected", [4] = "ClosedByPeer", [5] = "ProblemDetectedLocally" }
+        for _, m in ipairs(st.members or {}) do
+            if m.id ~= st.me then
+                local cs = m.conn_state or 0
+                if cs ~= 0 and cs ~= session.conn_states[m.id] then
+                    session.conn_states[m.id] = cs
+                    local extra = cs == 3 and string.format(" (%s, %d ms)", m.relayed and "relayed" or "direct", m.ping or -1)
+                        or ((m.conn_end and m.conn_end ~= 0) and string.format(" (end=%d %s)", m.conn_end, m.conn_debug or "") or "")
+                    say("P2P with %s: %s%s", m.name ~= "" and m.name or m.id, cnames[cs] or tostring(cs), extra)
+                end
+            end
+        end
         sync_members(st, t_now)
-    elseif session.last_members ~= "" then
-        session.last_members = ""
-        for id in pairs(peers) do if id ~= LOOPBACK_ID then drop_peer(id) end end
+    else
+        session.last_owner = nil
+        session.conn_states = nil
+        if session.last_members ~= "" then
+            session.last_members = ""
+            for id in pairs(peers) do if id ~= LOOPBACK_ID then drop_peer(id) end end
+        end
     end
     if t_now >= session.next_join_poll then
         session.next_join_poll = t_now + 1
@@ -6467,7 +6694,23 @@ re.on_draw_ui(function()
         imgui.text_colored("Steam isn't ready: " .. tostring(st.error), 0xFF4040FF)
     end
     imgui.text("You: " .. net.my_name() .. "   player: " .. (me.kind ~= "" and me.kind or "-") .. "   area: " .. (me.chapter ~= "" and me.chapter or "-"))
-    imgui.text("Session: " .. st.state .. (st.is_host and "  (host)" or "") .. (st.error ~= "" and ("  - " .. st.error) or ""))
+    local rnames = { [100] = "OK", [3] = "Connecting...", [2] = "Waiting...", [-10] = "Retrying", [-101] = "Failed", [-102] = "Offline" }
+    local relay_txt = (st.relay_avail and st.relay_avail ~= 0) and ("   relay: " .. (rnames[st.relay_avail] or tostring(st.relay_avail))) or ""
+    imgui.text("Session: " .. st.state .. (st.is_host and "  (host)" or "") .. relay_txt .. (st.error ~= "" and ("  - " .. st.error) or ""))
+    if st.state == "in_lobby" then
+        local cnames = { [0] = "Idle", [1] = "Connecting", [2] = "FindingRoute", [3] = "Connected", [4] = "ClosedByPeer", [5] = "Problem" }
+        for _, m in ipairs(st.members or {}) do
+            if m.id ~= st.me then
+                local cs = m.conn_state or 0
+                local p2p = cs == 3 and string.format("Connected (%s, %d ms)", m.relayed and "relayed" or "direct", m.ping or -1)
+                    or ((cnames[cs] or tostring(cs)) .. ((m.conn_end and m.conn_end ~= 0) and (" end=" .. m.conn_end) or ""))
+                imgui.text("P2P (" .. (m.name ~= "" and m.name or m.id) .. "): " .. p2p)
+            end
+        end
+        if (st.send_fail or 0) > 0 then
+            imgui.text_colored(string.format("Steam send errors: %d (last EResult %d)", st.send_fail, st.last_send_err or 0), 0xFF6080FF)
+        end
+    end
 
     if st.state == "in_lobby" then
         imgui.text("Lobby " .. st.lobby .. ", " .. #st.members .. " player(s)")

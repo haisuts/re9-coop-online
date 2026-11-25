@@ -1,6 +1,9 @@
 _deps/
 _backup/
+.agents/
+.codex/
 *.zip
+*.bak
 build/
 re9coop/plugin/build/
 dist/
