@@ -2,6 +2,9 @@
 
 Online co-op mod for **Resident Evil Requiem** (Steam) using Steam lobbies and Steam's peer-to-peer relay (`ISteamNetworkingMessages`). No port forwarding or VPN required.
 
+> **Community & Support (EN / RU):** Join the [**RE9 Co-op (Online) Discord**](https://discord.gg/pg3xxpKk9q) to find co-op partners, get setup help, and follow updates.
+> **Nexus Mods:** https://www.nexusmods.com/residentevilrequiem/mods/3351
+
 Inspired by *RE2 Co-op: HUNK* (Nexus Mods #2938); written completely from scratch for Resident Evil Requiem.
 
 ---

@@ -2,7 +2,8 @@
 
 Online co-op mod for **Resident Evil Requiem** (PC / Steam) using Steam lobbies and Steam's peer-to-peer relay (`ISteamNetworkingMessages`).
 
-> **Players:** Download the ready-to-install archive from [**Releases**](https://github.com/haisuts/re9-coop-online/releases/latest) (`RE9_Coop_Online_v0.12.9.zip`).
+> **Players:** Download the ready-to-install archive from [**Releases**](https://github.com/haisuts/re9-coop-online/releases/latest) (`RE9_Coop_Online_v0.12.9.zip`) or [**Nexus Mods**](https://www.nexusmods.com/residentevilrequiem/mods/3351).
+> **Community & Support (EN / RU):** Join the [**RE9 Co-op (Online) Discord**](https://discord.gg/pg3xxpKk9q) for co-op matchmaking (LFG), setup help, and updates.
 > **Developers:** Full Lua + C++ source code, build scripts, and offline tests are in this repository.
 
 ---
